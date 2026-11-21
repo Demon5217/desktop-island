@@ -1,0 +1,18 @@
+# 核心（没有就跑不起来）
+PySide6-Essentials>=6.12.0
+psutil>=7.0.0
+nvidia-ml-py>=13.0.0
+
+# Windows 媒体会话：音乐页的歌名 / 歌手 / 封面 / 播放控制
+winrt-runtime>=2.0
+winrt-Windows.Media.Control>=2.0
+winrt-Windows.Storage.Streams>=2.0
+
+# 可选 A：频谱律动 + 按进程音量（缺了只是没频谱、音量滑块无效）
+soundcard>=0.4
+numpy>=1.24
+pycaw>=20240210
+comtypes>=1.2
+
+# 可选 B：管理员模式下的逐进程精确网络流量（缺了自动降级为连接数模式）
+pyetwkit>=0.2

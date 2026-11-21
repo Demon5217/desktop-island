@@ -1,0 +1,36 @@
+# 构建产物与本地环境
+build/
+dist/
+*.spec
+__pycache__/
+*.py[cod]
+
+# 运行时数据（都在 %APPDATA%\DesktopIsland，这里兜底）
+config.json
+clipboard.json
+notes.json
+app.log
+*.log
+
+# 自检产物
+tools/*.png
+tools/*.log
+tools/*.out
+tools/*.err
+tools/*.txt
+notes/
+
+# 开发期探针脚本（路径写死了本机，没必要进仓库）
+tools/*_probe.py
+tools/*_debug.py
+tools/fs_fake.py
+tools/pot_*.py
+tools/desktophub.ico
+.tmp_drop.txt
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+tools/clip_probe2.py
