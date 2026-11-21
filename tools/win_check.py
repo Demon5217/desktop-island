@@ -9,7 +9,7 @@ found = []
 def cb(hwnd, lparam):
     buf = ctypes.create_unicode_buffer(256)
     u.GetWindowTextW(hwnd, buf, 256)
-    if buf.value and "Hub" in buf.value:
+    if buf.value and ("桌面灵动岛" in buf.value or "Desktop Island" in buf.value):
         r = wintypes.RECT()
         u.GetWindowRect(hwnd, ctypes.byref(r))
         found.append((hwnd, buf.value, u.IsWindowVisible(hwnd),
