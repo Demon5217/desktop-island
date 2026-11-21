@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""本地曲库：扫描播放器的下载目录，给「曲库」页做列表。
+"""本地曲库：扫描用户指定的音乐目录，给「曲库」页做列表。
 
 文件名按「歌手 - 歌名.mp3」解析；解析不出就整个当歌名。
-目录默认 D:\\KuGou（酷狗下载目录），可以在 config.json 里加 "music_dirs" 覆盖。
+**目录完全由用户配置**：config.json 的 "music_dirs"，界面上「＋ 目录」也能加。
+不自动猜路径——不知道用户把歌放哪儿，猜错了只会显示一堆乱七八糟的东西。
 """
 from __future__ import annotations
 
@@ -13,17 +14,6 @@ from core.appinfo import CONFIG_PATH
 
 EXTS = {".mp3", ".flac", ".wav", ".m4a", ".ogg", ".wma", ".aac", ".ape"}
 
-# 曲库默认目录：先找酷狗常见下载位置，都没有就是空列表（在 config.json 里配 music_dirs）
-_DEFAULT_CANDIDATES = [
-    os.path.join(os.path.expanduser("~"), "Music"),
-    os.path.join(os.path.expanduser("~"), "Documents", "KuGouMusic"),
-    r"D:\KuGou",
-]
-
-
-def _default_dirs() -> list:
-    dirs = [d for d in _DEFAULT_CANDIDATES if os.path.isdir(d)]
-    return dirs or []
 
 # PotPlayer 的命令行入口，用来点歌就播
 POT_CANDIDATES = [
@@ -33,15 +23,46 @@ POT_CANDIDATES = [
 ]
 
 
-def music_dirs() -> list:
+def _read_cfg() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            dirs = json.load(f).get("music_dirs")
-        if dirs:
-            return [str(d) for d in dirs]
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        pass
-    return _default_dirs()
+        return {}
+
+
+def _write_cfg(cfg: dict) -> bool:
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def music_dirs() -> list:
+    """用户配置的音乐目录，没配就是空列表。"""
+    dirs = _read_cfg().get("music_dirs") or []
+    return [str(d) for d in dirs if str(d).strip()]
+
+
+def add_dir(path: str) -> tuple:
+    """把一个目录加进配置（去重、只收真实存在的目录）。返回 (成功, 说明)。"""
+    path = os.path.abspath(os.path.expanduser(path.strip()))
+    if not os.path.isdir(path):
+        return False, "这个路径不是文件夹"
+    cfg = _read_cfg()
+    dirs = [str(d) for d in (cfg.get("music_dirs") or [])]
+    key = os.path.normcase(path)
+    if any(os.path.normcase(os.path.abspath(str(d))) == key for d in dirs):
+        return True, "这个目录已经在曲库里了"
+    dirs.append(path)
+    cfg["music_dirs"] = dirs
+    if not _write_cfg(cfg):
+        return False, "写配置失败"
+    return True, "已添加 %s" % path
 
 
 def player_exe() -> str | None:

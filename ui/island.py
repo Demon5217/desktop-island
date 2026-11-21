@@ -209,6 +209,8 @@ class IslandWindow(QWidget):
         self._close_hits: list = []
         self._music_hits: dict = {}
         self._player_btn_hit = None
+        self._lib_add_hit = None
+        self._hold_open = False
         self._pot_bg = True
         self._confirm_hits: dict = {}
         self._card_hits: dict = {}
@@ -1117,8 +1119,31 @@ class IslandWindow(QWidget):
         else:
             self._show_toast(msg)
 
+    def _add_music_dir(self) -> None:
+        """选一个音乐文件夹加进曲库（写进 config.json 的 music_dirs）。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        from core import library as L
+
+        self._hold_open = True
+        self._set_activatable(True)
+        try:
+            start = (L.music_dirs() or [os.path.expanduser("~")])[0]
+            path = QFileDialog.getExistingDirectory(self, "选择音乐文件夹", start)
+        finally:
+            self._set_activatable(False)
+            self._hold_open = False
+        if not path:
+            return
+        ok, msg = L.add_dir(path)
+        self._load_library()
+        if ok:
+            self._show_toast("%s（曲库 %d 首）" % (msg, len(self._lib)))
+        else:
+            self._show_toast(msg)
+
     def _maybe_collapse(self) -> None:
-        if self._dragging:
+        if self._dragging or self._hold_open:
             return
         if self.rect().contains(self.mapFromGlobal(QPoint(*_cursor_pos()))):
             return
@@ -1198,6 +1223,9 @@ class IslandWindow(QWidget):
             return False
 
         if self._page == "music":
+            if self._lib_add_hit is not None and self._lib_add_hit.contains(pos):
+                self._add_music_dir()
+                return True
             for idx, rect in self._lib_hits:
                 if rect.contains(pos):
                     self._play_lib(idx)
@@ -2027,9 +2055,23 @@ class IslandWindow(QWidget):
         p.setPen(T.DIM)
         p.drawText(QRectF(inner.left(), top - 4, 120, 18),
                    Qt.AlignLeft | Qt.AlignVCenter, "曲库")
-        p.drawText(QRectF(inner.left(), top - 4, inner.width(), 18),
+
+        # 「＋ 目录」：在界面里直接选文件夹加进曲库
+        add_btn = QRectF(inner.right() - 62, top - 6, 62, 20)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 14))
+        bp = QPainterPath()
+        bp.addRoundedRect(add_btn, 7, 7)
+        p.drawPath(bp)
+        p.setFont(T.font(9))
+        p.setPen(T.MUTED)
+        p.drawText(add_btn, Qt.AlignCenter, "＋ 目录")
+        self._lib_add_hit = add_btn
+
+        p.setPen(T.DIM)
+        p.drawText(QRectF(inner.left(), top - 4, inner.width() - 70, 18),
                    Qt.AlignRight | Qt.AlignVCenter,
-                   "%d 首 · 点一行用 PotPlayer 播放 · 滚轮翻页" % len(items))
+                   "%d 首 · 点一行播放 · 滚轮翻页" % len(items))
 
         list_top = top + 22
         visible = max(1, int((inner.bottom() - 22 - list_top) // self.LIB_ROW_H))
@@ -2040,7 +2082,7 @@ class IslandWindow(QWidget):
             p.setPen(T.MUTED)
             p.drawText(QRectF(inner.left(), list_top, inner.width(), inner.bottom() - list_top),
                        Qt.AlignCenter,
-                       "曲库是空的\n默认扫 D:\\KuGou，可在 config.json 里加 \"music_dirs\"")
+                       "曲库还没有目录\n点右上角「＋ 目录」加一个音乐文件夹\n（也可以写进 config.json 的 music_dirs）")
             return
 
         if self._lib_scroll > max(0, len(items) - visible):
@@ -2207,6 +2249,7 @@ class IslandWindow(QWidget):
         m = self._media
         self._lib_hits = []
         self._player_btn_hit = None
+        self._lib_add_hit = None
         if not self._lib:
             self._load_library()
 
