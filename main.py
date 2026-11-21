@@ -234,6 +234,9 @@ def run_app() -> None:
     act_auto.toggled.connect(on_auto)
 
     menu.addSeparator()
+    act_snap = menu.addAction("贴回屏幕顶部居中")
+    act_snap.triggered.connect(lambda: win.snap_to_top(animate=True))
+
     act_quit = menu.addAction("退出")
 
     def toggle():

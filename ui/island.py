@@ -111,6 +111,7 @@ RATE_FOCUS = {"net_up", "net_down", "disk_r", "disk_w"}
 
 class IslandWindow(QWidget):
     INSET = 12
+    SNAP_DIST = 40          # 胶囊顶边离屏幕顶小于这个距离，松手就吸回顶部居中
     COLLAPSED_W = 520
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
@@ -219,6 +220,8 @@ class IslandWindow(QWidget):
         self._anim = QPropertyAnimation(self, b"geometry", self)
         self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._snap_pending = False
+        self._anim.finished.connect(self._on_anim_finished)
 
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
@@ -537,11 +540,47 @@ class IslandWindow(QWidget):
         self._place_default()
 
     def _place_default(self) -> None:
+        """贴屏幕顶、水平居中。窗口顶边对齐可用区顶边，胶囊本体仍留 INSET 的内边距。"""
         size = self._content_size(False)
-        geo = QApplication.primaryScreen().availableGeometry()
+        screen = self.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
         x = geo.center().x() - size.width() // 2
-        y = geo.top() + 6
+        y = geo.top()
         self.setGeometry(QRect(x, y, size.width(), size.height()))
+
+    def snap_to_top(self, animate: bool = False) -> None:
+        """归位到顶部居中；animate=True 时带一段回弹动画。"""
+        size = QSize(self.width(), self.height())
+        screen = self.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        target = QRect(geo.center().x() - size.width() // 2, geo.top(),
+                       size.width(), size.height())
+        if not animate or self.geometry() == target:
+            self._anim.stop()
+            self.setGeometry(target)
+            self._save_position()
+            return
+        self._snap_pending = True
+        self._anim.stop()
+        self._anim.setDuration(220)
+        self._anim.setStartValue(self.geometry())
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _on_anim_finished(self) -> None:
+        if self._snap_pending:
+            self._snap_pending = False
+            self._save_position()
+
+    def _snap_on_release(self) -> bool:
+        """松手时如果胶囊已经贴近屏幕顶部，就吸回顶部居中。"""
+        screen = self.screen() or QApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        body_top = self.y() + self.INSET          # 胶囊本体顶边
+        if body_top - geo.top() > self.SNAP_DIST:
+            return False
+        self.snap_to_top(animate=True)
+        return True
 
     def _clamp_into_screen(self) -> None:
         screen = self.screen() or QApplication.primaryScreen()
@@ -564,6 +603,7 @@ class IslandWindow(QWidget):
         target.moveLeft(x)
 
         self._anim.stop()
+        self._anim.setDuration(240)
         self._anim.setStartValue(cur)
         self._anim.setEndValue(target)
         self._anim.start()
@@ -1352,7 +1392,8 @@ class IslandWindow(QWidget):
         if self._dragging:
             self._dragging = False
             self._drag_offset = None
-            self._save_position()
+            if not self._snap_on_release():
+                self._save_position()
             self._collapse_timer.start()
         super().mouseReleaseEvent(e)
 
