@@ -234,8 +234,12 @@ def run_app() -> None:
     act_auto.toggled.connect(on_auto)
 
     menu.addSeparator()
-    act_snap = menu.addAction("贴回屏幕顶部居中")
-    act_snap.triggered.connect(lambda: win.snap_to_top(animate=True))
+    dock_menu = menu.addMenu("停靠位置")
+    for key, name in (("top", "顶部居中"), ("left", "左侧竖排"),
+                      ("right", "右侧竖排"), ("bottom", "任务栏上方")):
+        act_dock = dock_menu.addAction(name)
+        act_dock.triggered.connect(
+            lambda _c=False, k=key: win._apply_dock(k, animate=True, center=(k == "top")))
 
     act_quit = menu.addAction("退出")
 

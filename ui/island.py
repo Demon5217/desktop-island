@@ -112,10 +112,12 @@ RATE_FOCUS = {"net_up", "net_down", "disk_r", "disk_w"}
 
 class IslandWindow(QWidget):
     INSET = 12
-    SNAP_DIST = 40          # 胶囊顶边离屏幕顶小于这个距离，松手就吸回顶部居中
+    SNAP_DIST = 48          # 胶囊本体离屏幕任一边小于这个距离，松手就吸附上去
     COLLAPSED_W = 480
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
+    SIDE_W = 62             # 贴左右两侧时的竖向胶囊（本体尺寸，不含 INSET）
+    SIDE_H = 200
     PAGE_SIZES = {
         "monitor": QSize(640, 350),
         "process": QSize(640, 412),
@@ -312,7 +314,8 @@ class IslandWindow(QWidget):
             pass
         self.setAcceptDrops(True)
 
-        self._anchor_cx = None      # 胶囊的水平中心锚点（展开/收起都以它为基准）
+        self._dock = "top"              # top / left / right / bottom / free
+        self._dock_rect = None          # 收起态窗口矩形（尺寸变化都以它为准，不会漂）
         self._restore_geometry()
         self._on_tick()
 
@@ -554,12 +557,23 @@ class IslandWindow(QWidget):
         self._toast = ""
         self.update()
 
-    # ================================================================== 尺寸与动画
+    # ================================================================== 尺寸与停靠
+    DOCK_SIDES = ("top", "left", "right", "bottom", "free")
+
+    def _is_side(self) -> bool:
+        return self._dock in ("left", "right")
+
+    def _collapsed_base(self) -> QSize:
+        """胶囊本体尺寸（不含 INSET）：贴左右两侧时是竖的。"""
+        if self._is_side():
+            return QSize(self.SIDE_W, self.SIDE_H)
+        return QSize(self.COLLAPSED_W, self._collapsed_h())
+
     def _content_size(self, expanded: bool) -> QSize:
         if expanded:
             base = self.PAGE_SIZES.get(self._page, self.PAGE_SIZES["monitor"])
         else:
-            base = QSize(self.COLLAPSED_W, self._collapsed_h())
+            base = self._collapsed_base()
         return QSize(base.width() + 2 * self.INSET, base.height() + 2 * self.INSET)
 
     def _collapsed_h(self) -> int:
@@ -569,67 +583,122 @@ class IslandWindow(QWidget):
             return self.COLLAPSED_H_PLAY
         return self.COLLAPSED_H_IDLE
 
-    def _x_for_width(self, width: int) -> int:
-        """按锚点中心算出某个宽度下的左上角 x（不靠当前几何反推，避免累积误差）。"""
-        cx = self._anchor_cx
-        if cx is None:
-            cx = self.x() + self.width() / 2.0
-            self._anchor_cx = cx
-        return int(round(cx - width / 2.0))
+    def _screen_area(self) -> QRect:
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry()
 
-    def _set_anchor_here(self) -> None:
-        self._anchor_cx = self.x() + self.width() / 2.0
+    @staticmethod
+    def _cx(r: QRect) -> float:
+        """几何中心（浮点，避免 QRect.center() 的 w-1 取整误差一层层累积）。"""
+        return r.left() + r.width() / 2.0
+
+    @staticmethod
+    def _cy(r: QRect) -> float:
+        return r.top() + r.height() / 2.0
+
+    def _dock_rect_for(self, dock: str, size: QSize, ref: QRect | None = None) -> QRect:
+        """按停靠边算出收起态窗口矩形。ref 用来保持「沿边居中」的那一侧不动。"""
+        a = self._screen_area()
+        if ref is None:
+            ref = QRect(a.left() + (a.width() - size.width()) // 2, a.top(),
+                        size.width(), size.height())
+        if dock == "top":
+            x = int(round(self._cx(ref) - size.width() / 2.0))
+            y = a.top()
+        elif dock == "bottom":
+            x = int(round(self._cx(ref) - size.width() / 2.0))
+            y = a.bottom() - size.height() + 1      # 底边贴任务栏上方
+        elif dock == "left":
+            x = a.left()
+            y = int(round(self._cy(ref) - size.height() / 2.0))
+        elif dock == "right":
+            x = a.right() - size.width() + 1
+            y = int(round(self._cy(ref) - size.height() / 2.0))
+        else:
+            x, y = ref.x(), ref.y()
+        x = min(max(x, a.left()), a.right() - size.width() + 1)
+        y = min(max(y, a.top()), a.bottom() - size.height() + 1)
+        return QRect(x, y, size.width(), size.height())
+
+    def _target_rect(self, expanded: bool) -> QRect:
+        """展开态的目标矩形：顶/底向下或向上长，左/右向内展开。"""
+        if not expanded:
+            return QRect(self._dock_rect)
+        size = self._content_size(True)
+        d = self._dock_rect
+        a = self._screen_area()
+        if self._dock == "bottom":
+            x = int(round(self._cx(d) - size.width() / 2.0))
+            y = d.bottom() - size.height() + 1
+        elif self._dock == "left":
+            x = d.left()
+            y = int(round(self._cy(d) - size.height() / 2.0))
+        elif self._dock == "right":
+            x = d.right() - size.width() + 1
+            y = int(round(self._cy(d) - size.height() / 2.0))
+        else:
+            x = int(round(self._cx(d) - size.width() / 2.0))
+            y = d.top()
+        x = min(max(x, a.left()), a.right() - size.width() + 1)
+        y = min(max(y, a.top()), a.bottom() - size.height() + 1)
+        return QRect(int(x), int(y), size.width(), size.height())
 
     def _sync_collapsed_size(self) -> None:
-        """播放状态变化时，收起胶囊的高度跟着变（水平中心不动、顶部对齐）。"""
+        """播放状态变化时，收起胶囊的高度跟着变（沿停靠边对齐的那一侧不动）。"""
+        size = self._content_size(False)
+        if self._dock_rect is not None and self._dock_rect.size() != size:
+            self._dock_rect = self._dock_rect_for(self._dock, size, QRect(self._dock_rect))
         if self._expanded or self._dragging:
             return
-        size = self._content_size(False)
         g = self.geometry()
         if g.width() == size.width() and g.height() == size.height():
             return
         self._anim.stop()
-        self.setGeometry(QRect(self._x_for_width(size.width()), g.y(),
-                               size.width(), size.height()))
+        self.setGeometry(self._dock_rect)
         self.update()
 
     def _restore_geometry(self) -> None:
-        size = self._content_size(False)
-        pos = None
+        cfg = {}
         try:
             with open(CFG_PATH, "r", encoding="utf-8") as f:
-                pos = json.load(f).get("pos")
+                cfg = json.load(f) or {}
         except Exception:
-            pos = None
-        if pos and isinstance(pos, list) and len(pos) == 2:
-            x, y = int(pos[0]), int(pos[1])
-            self.setGeometry(QRect(x, y, size.width(), size.height()))
-            self._anchor_cx = x + size.width() / 2.0
-            self._clamp_into_screen()
-            return
-        self._place_default()
+            cfg = {}
+        dock = cfg.get("dock")
+        self._dock = dock if dock in self.DOCK_SIDES else "top"
+        size = self._content_size(False)
+        pos = cfg.get("pos")
+        ref = None
+        if isinstance(pos, list) and len(pos) == 2:
+            ref = QRect(int(pos[0]), int(pos[1]), size.width(), size.height())
+        self._dock_rect = self._dock_rect_for(self._dock, size, ref)
+        self.setGeometry(self._dock_rect)
 
     def _place_default(self) -> None:
-        """贴屏幕顶、水平居中。窗口顶边对齐可用区顶边，胶囊本体仍留 INSET 的内边距。"""
-        size = self._content_size(False)
-        screen = self.screen() or QApplication.primaryScreen()
-        geo = screen.availableGeometry()
-        cx = geo.left() + geo.width() / 2.0
-        x = int(round(cx - size.width() / 2.0))
-        y = geo.top()
-        self.setGeometry(QRect(x, y, size.width(), size.height()))
-        self._anchor_cx = cx
+        """回到顶部居中。"""
+        self._apply_dock("top", animate=False, center=True)
 
     def snap_to_top(self, animate: bool = False) -> None:
-        """归位到顶部居中；animate=True 时带一段回弹动画。"""
-        size = self.width()
-        screen = self.screen() or QApplication.primaryScreen()
-        geo = screen.availableGeometry()
-        cx = geo.left() + geo.width() / 2.0
-        self._anchor_cx = cx
-        x = int(round(cx - size / 2.0))
-        target = QRect(x, geo.top(), self.width(), self.height())
-        if not animate or self.geometry() == target:
+        self._apply_dock("top", animate=animate, center=True)
+
+    def _apply_dock(self, dock: str, animate: bool = True, center: bool = False) -> None:
+        """换停靠边：重算收起态矩形，展开着就顺带把面板挪过去。"""
+        if dock not in self.DOCK_SIDES:
+            return
+        old, self._dock = self._dock, dock
+        size = self._content_size(False)
+        ref = QRect(self._dock_rect or self.geometry())
+        a = self._screen_area()
+        # 横排 ↔ 竖排切换时，另一根轴没有沿边中心，直接回到屏幕中央
+        if dock in ("top", "bottom") and (center or old in ("left", "right")):
+            ref.setRect(a.left() + (a.width() - size.width()) // 2, ref.top(),
+                        size.width(), size.height())
+        elif dock in ("left", "right") and old in ("top", "bottom", "free"):
+            ref.setRect(ref.left(), a.top() + (a.height() - size.height()) // 2,
+                        size.width(), size.height())
+        self._dock_rect = self._dock_rect_for(dock, size, ref)
+        target = self._target_rect(self._expanded)
+        if not animate:
             self._anim.stop()
             self.setGeometry(target)
             self._save_position()
@@ -637,10 +706,15 @@ class IslandWindow(QWidget):
         self._snap_pending = True
         self._anim.stop()
         self._anim.setDuration(220)
-        self._anim.setEasingCurve(QEasingCurve.OutBack)   # 归位带一点点回弹
+        self._anim.setEasingCurve(QEasingCurve.OutBack)
         self._anim.setStartValue(self.geometry())
         self._anim.setEndValue(target)
         self._anim.start()
+
+    def _clamp_into_screen(self) -> None:
+        size = self._content_size(False)
+        self._dock_rect = self._dock_rect_for(self._dock, size, QRect(self.geometry()))
+        self.setGeometry(self._dock_rect)
 
     def _on_anim_finished(self) -> None:
         if self._snap_pending:
@@ -725,24 +799,26 @@ class IslandWindow(QWidget):
         return max(0.0, min(1.0, (s - start) / span)) * self._content_op
 
     def _snap_on_release(self) -> bool:
-        """松手时如果胶囊已经贴近屏幕顶部，就吸回顶部居中。"""
-        screen = self.screen() or QApplication.primaryScreen()
-        geo = screen.availableGeometry()
-        body_top = self.y() + self.INSET          # 胶囊本体顶边
-        if body_top - geo.top() > self.SNAP_DIST:
-            return False
-        self.snap_to_top(animate=True)
-        return True
-
-    def _clamp_into_screen(self) -> None:
-        screen = self.screen() or QApplication.primaryScreen()
-        a = screen.availableGeometry()
+        """松手时看离哪条边最近：48px 内就吸附，左右会顺带转成竖向。"""
+        a = self._screen_area()
         g = self.geometry()
-        x = min(max(g.x(), a.left() - self.INSET), a.right() - g.width() + self.INSET)
-        y = min(max(g.y(), a.top()), a.bottom() - self.INSET)
-        if x != g.x() or y != g.y():
-            self.move(x, y)
-            self._set_anchor_here()
+        body = g.adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET)
+        cands = [
+            ("top", body.top() - a.top()),
+            ("left", body.left() - a.left()),
+            ("right", a.right() - body.right()),
+            ("bottom", a.bottom() - body.bottom()),
+        ]
+        dock, dist = min(cands, key=lambda kv: kv[1])
+        if dist > self.SNAP_DIST:
+            self._dock = "free"
+            cw = self._content_size(False)
+            self._dock_rect = QRect(int(g.center().x() - cw.width() / 2), g.top(),
+                                    cw.width(), cw.height())
+            return False
+        self._dock_rect = self._dock_rect_for(dock, self._content_size(False), QRect(g))
+        self._apply_dock(dock, animate=True)
+        return True
 
     def _animate_to(self, expanded: bool) -> None:
         if expanded:
@@ -777,17 +853,8 @@ class IslandWindow(QWidget):
         self.update()
 
     def _resize_to(self, expanded: bool) -> None:
-        size = self._content_size(expanded)
         cur = self.geometry()
-        # 展开/收起只改尺寸，水平中心永远回到锚点，不拿当前几何反推（否则 1px 取舍会累积）
-        target = QRect(self._x_for_width(size.width()), cur.top(),
-                       size.width(), size.height())
-
-        screen = self.screen() or QApplication.primaryScreen()
-        a = screen.availableGeometry()
-        x = min(max(target.x(), a.left() - self.INSET), a.right() - size.width() + self.INSET)
-        target.moveLeft(x)
-
+        target = self._target_rect(expanded)
         self._anim.stop()
         self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -1582,7 +1649,6 @@ class IslandWindow(QWidget):
         if self._dragging:
             self._dragging = False
             self._drag_offset = None
-            self._set_anchor_here()
             if not self._snap_on_release():
                 self._save_position()
             self._collapse_timer.start()
@@ -1646,10 +1712,10 @@ class IslandWindow(QWidget):
         self._scroll_vel *= 0.74
 
     def _save_position(self) -> None:
-        """存「收起态」的左上角，且水平按中心换算。
+        """存停靠边 + 收起态左上角。
 
-        展开面板比胶囊宽，直接存窗口左上角会让下次启动整体偏一侧
-        （早先就是这样：展开宽度 664、收起 544，差出的 60px 每次都被钉在左边）。
+        展开面板和竖向胶囊的尺寸都不一样，所以只存「收起态」坐标 + dock 边，
+        启动时由 _dock_rect_for 还原，不会因为宽度/高度变化整体漂掉。
         """
         try:
             os.makedirs(CFG_DIR, exist_ok=True)
@@ -1657,9 +1723,11 @@ class IslandWindow(QWidget):
             if os.path.exists(CFG_PATH):
                 with open(CFG_PATH, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-            cw = self._content_size(False).width()
-            cx = (self.x() + self.width() // 2) - cw // 2
-            cfg["pos"] = [int(cx), int(self.y())]
+            if self._dock_rect is None:
+                self._dock_rect = self._dock_rect_for(self._dock, self._content_size(False),
+                                                      QRect(self.geometry()))
+            cfg["dock"] = self._dock
+            cfg["pos"] = [int(self._dock_rect.x()), int(self._dock_rect.y())]
             with open(CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -1668,12 +1736,15 @@ class IslandWindow(QWidget):
     def contextMenuEvent(self, e) -> None:
         menu = QMenu(self)
         act_reset = menu.addAction("回到顶部居中")
+        act_bottom = menu.addAction("停靠在任务栏上方")
         menu.addSeparator()
         act_quit = menu.addAction("退出")
         chosen = menu.exec(e.globalPos())
         if chosen is act_reset:
             self._place_default()
             self._save_position()
+        elif chosen is act_bottom:
+            self._apply_dock("bottom", animate=True)
         elif chosen is act_quit:
             QApplication.quit()
 
@@ -1759,7 +1830,7 @@ class IslandWindow(QWidget):
             self.width() - 2 * self.INSET,
             self.height() - 2 * self.INSET,
         )
-        radius = body.height() / 2.0 if not self._expanded else 22.0
+        radius = 22.0 if self._expanded else min(body.width(), body.height()) / 2.0
 
         self._paint_shadow(p, body, radius)
         self._paint_body(p, body, radius)
@@ -1855,6 +1926,9 @@ class IslandWindow(QWidget):
 
     # ------------------------------------------------------------ 收起态
     def _paint_collapsed(self, p: QPainter, body: QRectF) -> None:
+        if self._is_side():
+            self._paint_collapsed_side(p, body)
+            return
         d = self._data
         tall = body.height() > 58.0  # 有音乐时胶囊更高，指标行上移给频谱让位
         cy = body.top() + (11 if tall else 21)
@@ -1934,6 +2008,67 @@ class IslandWindow(QWidget):
             if fill_w > 1:
                 p.drawRoundedRect(QRectF(bx, bar_y, fill_w, bar_h), 1.1, 1.1)
             bx += seg_w + gap
+
+    def _paint_collapsed_side(self, p: QPainter, body: QRectF) -> None:
+        """竖向胶囊：四项指标从上往下排，左侧细占用条；播放时右缘一条竖频谱。"""
+        d = self._data
+        cpu = d.get("cpu", 0.0) or 0.0
+        gpu = d.get("gpu_util")
+        vram_pct = 0.0
+        if d.get("vram_total"):
+            vram_pct = d.get("vram_used", 0.0) / d["vram_total"] * 100.0
+        items = [
+            ("CPU", f"{cpu:.0f}%", cpu, T.CPU),
+            ("GPU", "--" if gpu is None else f"{gpu:.0f}%", gpu or 0.0, T.GPU),
+            ("RAM", f"{d.get('ram', 0.0):.0f}%", d.get("ram", 0.0), T.RAM),
+            ("VRAM", f"{vram_pct:.0f}%" if d.get("vram_total") else "--", vram_pct, T.VRAM),
+        ]
+        top = body.top() + 9.0
+        row_h = (body.height() - 9.0 - (top - body.top())) / 4.0
+        lf = T.font(9)
+        vf = T.font(13, True, True)
+        tx = body.left() + 13.0
+        tw = body.width() - 18.0
+        for i, (label, value, pct, color) in enumerate(items):
+            y = top + row_h * i
+            bx = body.left() + 6.0
+            inner_h = row_h - 8.0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 20))
+            p.drawRoundedRect(QRectF(bx, y + 4.0, 2.2, inner_h), 1.1, 1.1)
+            c = T.load_color(pct, color)
+            c.setAlpha(205)
+            p.setBrush(c)
+            fill = inner_h * max(0.0, min(float(pct), 100.0)) / 100.0
+            if fill > 1.0:
+                p.drawRoundedRect(QRectF(bx, y + 4.0 + inner_h - fill, 2.2, fill), 1.1, 1.1)
+            p.setFont(lf)
+            p.setPen(T.MUTED)
+            p.drawText(QRectF(tx, y + 1, tw, 11), Qt.AlignLeft | Qt.AlignVCenter, label)
+            p.setFont(vf)
+            p.setPen(T.load_color(pct, color))
+            p.drawText(QRectF(tx, y + 12, tw, 18), Qt.AlignLeft | Qt.AlignVCenter, value)
+
+        media = self._media
+        if self._spec_level > 0.01 or media.get("playing"):
+            self._paint_side_spec(p,
+                                  QRectF(body.right() - 6.0, body.top() + 10.0,
+                                         3.2, body.height() - 20.0))
+
+    def _paint_side_spec(self, p: QPainter, rect: QRectF) -> None:
+        """竖向胶囊右缘的竖频谱：32 段细横条，长度随音量。"""
+        n = len(self._spec) or 32
+        slot = rect.height() / n
+        bh = max(1.2, slot * 0.55)
+        p.setPen(Qt.NoPen)
+        for i, v in enumerate(self._spec):
+            v = max(0.0, min(1.0, float(v)))
+            w = 1.2 + v * (rect.width() - 1.2)
+            c = self._spectrum_color(i / max(1, n - 1))
+            c.setAlpha(90 + int(140 * v))
+            p.setBrush(c)
+            y = rect.top() + slot * i + (slot - bh) / 2.0
+            p.drawRoundedRect(QRectF(rect.left(), y, w, bh), bh / 2.0, bh / 2.0)
 
     def _paint_micro_spec(self, p: QPainter, rect: QRectF) -> None:
         """收起胶囊底部那条细频谱。"""
