@@ -117,7 +117,7 @@ class IslandWindow(QWidget):
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
     SIDE_W = 62             # 贴左右两侧时的竖向胶囊（本体尺寸，不含 INSET）
-    SIDE_H = 200
+    SIDE_H = 232
     PAGE_SIZES = {
         "monitor": QSize(640, 350),
         "process": QSize(640, 412),
@@ -2009,24 +2009,42 @@ class IslandWindow(QWidget):
                 p.drawRoundedRect(QRectF(bx, bar_y, fill_w, bar_h), 1.1, 1.1)
             bx += seg_w + gap
 
+    @staticmethod
+    def _brief_rate(v: float) -> str:
+        """竖向胶囊空间小，网速用 1.3M / 351K / 18B 这种紧凑写法。"""
+        try:
+            v = float(v or 0.0)
+        except Exception:
+            return "0B"
+        if v >= 1048576:
+            return f"{v / 1048576:.1f}M"
+        if v >= 1024:
+            return f"{v / 1024:.0f}K"
+        return f"{v:.0f}B"
+
     def _paint_collapsed_side(self, p: QPainter, body: QRectF) -> None:
-        """竖向胶囊：四项指标从上往下排，左侧细占用条；播放时右缘一条竖频谱。"""
+        """竖向胶囊：指标从上往下排，左侧细占用条；播放时右缘一条竖频谱。"""
         d = self._data
         cpu = d.get("cpu", 0.0) or 0.0
         gpu = d.get("gpu_util")
         vram_pct = 0.0
         if d.get("vram_total"):
             vram_pct = d.get("vram_used", 0.0) / d["vram_total"] * 100.0
+        up = d.get("net_up", 0.0) or 0.0
+        down = d.get("net_down", 0.0) or 0.0
+        net_pct = min(100.0, max(up, down) / 1048576.0 * 100.0)
         items = [
             ("CPU", f"{cpu:.0f}%", cpu, T.CPU),
             ("GPU", "--" if gpu is None else f"{gpu:.0f}%", gpu or 0.0, T.GPU),
             ("RAM", f"{d.get('ram', 0.0):.0f}%", d.get("ram", 0.0), T.RAM),
             ("VRAM", f"{vram_pct:.0f}%" if d.get("vram_total") else "--", vram_pct, T.VRAM),
+            ("NET", f"↑{self._brief_rate(up)} ↓{self._brief_rate(down)}", net_pct, T.NET),
         ]
-        top = body.top() + 9.0
-        row_h = (body.height() - 9.0 - (top - body.top())) / 4.0
+        top = body.top() + 8.0
+        row_h = (body.height() - 8.0 - (top - body.top())) / len(items)
         lf = T.font(9)
         vf = T.font(13, True, True)
+        vf_small = T.font(9, True, True)
         tx = body.left() + 13.0
         tw = body.width() - 18.0
         for i, (label, value, pct, color) in enumerate(items):
@@ -2045,9 +2063,11 @@ class IslandWindow(QWidget):
             p.setFont(lf)
             p.setPen(T.MUTED)
             p.drawText(QRectF(tx, y + 1, tw, 11), Qt.AlignLeft | Qt.AlignVCenter, label)
-            p.setFont(vf)
-            p.setPen(T.load_color(pct, color))
-            p.drawText(QRectF(tx, y + 12, tw, 18), Qt.AlignLeft | Qt.AlignVCenter, value)
+            small = label == "NET"
+            p.setFont(vf_small if small else vf)
+            p.setPen(color if small else T.load_color(pct, color))
+            p.drawText(QRectF(tx, y + (14 if small else 12), tw, 18 if small else 18),
+                       Qt.AlignLeft | Qt.AlignVCenter, value)
 
         media = self._media
         if self._spec_level > 0.01 or media.get("playing"):
