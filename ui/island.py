@@ -2023,7 +2023,8 @@ class IslandWindow(QWidget):
         return f"{v:.0f}B"
 
     def _paint_collapsed_side(self, p: QPainter, body: QRectF) -> None:
-        """竖向胶囊：指标从上往下排，左侧细占用条；播放时右缘一条竖频谱。"""
+        """竖向胶囊：每行一根竖条 + 右侧文字，条与那一行的数据垂直对齐；
+        网速不画条，单独压在最底部一行。"""
         d = self._data
         cpu = d.get("cpu", 0.0) or 0.0
         gpu = d.get("gpu_util")
@@ -2032,42 +2033,52 @@ class IslandWindow(QWidget):
             vram_pct = d.get("vram_used", 0.0) / d["vram_total"] * 100.0
         up = d.get("net_up", 0.0) or 0.0
         down = d.get("net_down", 0.0) or 0.0
-        net_pct = min(100.0, max(up, down) / 1048576.0 * 100.0)
         items = [
             ("CPU", f"{cpu:.0f}%", cpu, T.CPU),
             ("GPU", "--" if gpu is None else f"{gpu:.0f}%", gpu or 0.0, T.GPU),
             ("RAM", f"{d.get('ram', 0.0):.0f}%", d.get("ram", 0.0), T.RAM),
             ("VRAM", f"{vram_pct:.0f}%" if d.get("vram_total") else "--", vram_pct, T.VRAM),
-            ("NET", f"↑{self._brief_rate(up)} ↓{self._brief_rate(down)}", net_pct, T.NET),
         ]
-        top = body.top() + 8.0
-        row_h = (body.height() - 8.0 - (top - body.top())) / len(items)
+        pad_top = 6.0
+        net_h = 34.0
+        row_h = (body.height() - pad_top - net_h) / len(items)
+        block_h = 30.0            # 一行文字（标签 12 + 数值 18）
         lf = T.font(9)
         vf = T.font(13, True, True)
-        vf_small = T.font(9, True, True)
-        tx = body.left() + 13.0
-        tw = body.width() - 18.0
+        bar_x = body.left() + 7.0
+        bar_w = 3.0
+        bar_h = block_h
+        tx = body.left() + 14.0
+        tw = body.width() - 19.0
         for i, (label, value, pct, color) in enumerate(items):
-            y = top + row_h * i
-            bx = body.left() + 6.0
-            inner_h = row_h - 8.0
+            block_top = body.top() + pad_top + row_h * i + (row_h - block_h) / 2.0
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 20))
-            p.drawRoundedRect(QRectF(bx, y + 4.0, 2.2, inner_h), 1.1, 1.1)
+            p.setBrush(QColor(255, 255, 255, 34))
+            p.drawRoundedRect(QRectF(bar_x, block_top, bar_w, bar_h), 1.5, 1.5)
             c = T.load_color(pct, color)
-            c.setAlpha(205)
+            c.setAlpha(215)
             p.setBrush(c)
-            fill = inner_h * max(0.0, min(float(pct), 100.0)) / 100.0
+            fill = bar_h * max(0.0, min(float(pct), 100.0)) / 100.0
             if fill > 1.0:
-                p.drawRoundedRect(QRectF(bx, y + 4.0 + inner_h - fill, 2.2, fill), 1.1, 1.1)
+                p.drawRoundedRect(QRectF(bar_x, block_top + bar_h - fill, bar_w, fill),
+                                  1.5, 1.5)
             p.setFont(lf)
             p.setPen(T.MUTED)
-            p.drawText(QRectF(tx, y + 1, tw, 11), Qt.AlignLeft | Qt.AlignVCenter, label)
-            small = label == "NET"
-            p.setFont(vf_small if small else vf)
-            p.setPen(color if small else T.load_color(pct, color))
-            p.drawText(QRectF(tx, y + (14 if small else 12), tw, 18 if small else 18),
-                       Qt.AlignLeft | Qt.AlignVCenter, value)
+            p.drawText(QRectF(tx, block_top, tw, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
+            p.setFont(vf)
+            p.setPen(T.load_color(pct, color))
+            p.drawText(QRectF(tx, block_top + 12, tw, 18), Qt.AlignLeft | Qt.AlignVCenter, value)
+
+        # 网速单独一块：一条淡分隔线 + 居中一行
+        net_y = body.bottom() - net_h
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawLine(QPointF(body.left() + 11.0, net_y), QPointF(body.right() - 11.0, net_y))
+        p.setFont(T.font(9, True, True))
+        p.setPen(T.NET)
+        p.drawText(QRectF(body.left() + 3.0, net_y + 7.0, body.width() - 6.0, 18.0),
+                   Qt.AlignHCenter | Qt.AlignVCenter,
+                   f"↑{self._brief_rate(up)} ↓{self._brief_rate(down)}")
 
         media = self._media
         if self._spec_level > 0.01 or media.get("playing"):
