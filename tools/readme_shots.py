@@ -61,6 +61,15 @@ win._maybe_collapse = lambda: None  # 探针模式下鼠标不在窗口上，禁
 m.start()
 p.start()
 
+# 预填一段曲线历史，省得等 45 秒攒点（否则截图里的折线几乎是空的）
+for i in range(48):
+    win._hist["cpu"].append(18 + (i * 9) % 58)
+    win._hist["gpu"].append(8 + (i * 13) % 34)
+    win._hist["ram"].append(44 + (i * 4) % 14)
+    win._hist["vram"].append(6 + (i * 7) % 22)
+win._spec = [0.18 + ((i * 13) % 68) / 100.0 for i in range(32)]
+win._peak = [min(1.0, v + 0.14) for v in win._spec]
+
 
 def save(name):
     win.grab().save(os.path.join(OUT, name + ".png"), "PNG")
@@ -68,10 +77,10 @@ def save(name):
 
 
 def run():
-    # 监控页：先攒够折线图的历史样本（每秒一个点）再截，否则曲线几乎是空的
+    # 曲线已经预填过，只需等动画和首帧，不再等 45 秒
     win.set_page("monitor")
     win._animate_to(True)
-    QTimer.singleShot(45000, lambda: (save("monitor"), step_process()))
+    QTimer.singleShot(2200, lambda: (save("monitor"), step_process()))
 
 
 def step_process():

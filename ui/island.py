@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
     QUrl,
+    QVariantAnimation,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -143,6 +144,7 @@ class IslandWindow(QWidget):
         self._audio = audio_worker
         self._volume = volume_worker
         self._spec: list = [0.0] * 32
+        self._peak: list = [0.0] * 32       # 频谱峰值保持
         self._spec_level = 0.0
         self._vol_value = 1.0
         self._vol_hit: QRectF | None = None
@@ -223,10 +225,55 @@ class IslandWindow(QWidget):
         self._snap_pending = False
         self._anim.finished.connect(self._on_anim_finished)
 
+        # 标题栏的下划线指示器：切页时从旧位置滑过去
+        self._tab_ind = None            # (x, w) 当前指示器位置，窗口坐标
+        self._tab_active = (0.0, 0.0)   # 当前页 tab 的 (x, w)，指示器未初始化时兜底
+        self._tab_from = (0.0, 0.0)
+        self._tab_to = (0.0, 0.0)
+        self._tab_anim = QVariantAnimation(self)
+        self._tab_anim.setDuration(220)
+        self._tab_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._tab_anim.setStartValue(0.0)
+        self._tab_anim.setEndValue(1.0)
+        self._tab_anim.valueChanged.connect(self._on_tab_anim)
+
+        # 内容动效：展开时整体淡入 + 卡片错峰出现；切页时新页淡入上浮
+        self._content_op = 1.0
+        self._stagger = 1.0
+        self._page_op = 1.0
+        self._fx = QVariantAnimation(self)          # 整体淡入淡出
+        self._fx.setEasingCurve(QEasingCurve.OutCubic)
+        self._fx.valueChanged.connect(self._on_content_fx)
+        self._fx_card = QVariantAnimation(self)     # 卡片错峰
+        self._fx_card.setDuration(380)
+        self._fx_card.setEasingCurve(QEasingCurve.OutCubic)
+        self._fx_card.setStartValue(0.0)
+        self._fx_card.setEndValue(1.0)
+        self._fx_card.valueChanged.connect(self._on_stagger_fx)
+        self._page_fx = QVariantAnimation(self)     # 切页
+        self._page_fx.setDuration(200)
+        self._page_fx.setEasingCurve(QEasingCurve.OutCubic)
+        self._page_fx.setStartValue(0.0)
+        self._page_fx.setEndValue(1.0)
+        self._page_fx.valueChanged.connect(self._on_page_fx)
+
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.setInterval(480)
         self._collapse_timer.timeout.connect(self._maybe_collapse)
+
+        # 收起时先淡出内容（130ms），再切布局和尺寸
+        self._collapse_anim = QTimer(self)
+        self._collapse_anim.setSingleShot(True)
+        self._collapse_anim.setInterval(130)
+        self._collapse_anim.timeout.connect(self._apply_collapse)
+
+        # 滚轮惯性
+        self._scroll_vel = 0.0
+        self._scroll_acc = 0.0
+        self._inertia = QTimer(self)
+        self._inertia.setInterval(26)
+        self._inertia.timeout.connect(self._on_inertia)
 
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
@@ -435,6 +482,14 @@ class IslandWindow(QWidget):
     def _on_spectrum(self, bands: list, level: float) -> None:
         self._spec = bands
         self._spec_level = level
+        # 峰值保持：掉得比涨得慢，柱子顶端留一小截，看起来更像有惯性的声电平
+        for i, v in enumerate(bands):
+            if i >= len(self._peak):
+                break
+            if v >= self._peak[i]:
+                self._peak[i] = float(v)
+            else:
+                self._peak[i] = max(0.0, self._peak[i] - 0.045)
         playing = bool(self._media.get("playing"))
         if not self._expanded:
             # 收起胶囊：只有真有声音时重绘，不然 25fps 白刷
@@ -582,6 +637,7 @@ class IslandWindow(QWidget):
         self._snap_pending = True
         self._anim.stop()
         self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.OutBack)   # 归位带一点点回弹
         self._anim.setStartValue(self.geometry())
         self._anim.setEndValue(target)
         self._anim.start()
@@ -590,6 +646,83 @@ class IslandWindow(QWidget):
         if self._snap_pending:
             self._snap_pending = False
             self._save_position()
+
+    # ------------------------------------------------------------ 动效回调
+    def _on_tab_anim(self, v) -> None:
+        fx, fw = self._tab_from
+        tx, tw = self._tab_to
+        self._tab_ind = (fx + (tx - fx) * float(v), fw + (tw - fw) * float(v))
+        self.update()
+
+    def _tab_rects(self) -> dict:
+        """和 _paint_header 同一套算法，算出每个 tab 的 (x, 宽)。"""
+        pad = 18
+        x = self.INSET + pad + 100
+        labels = PAGE_LABELS
+        if self._page == "process":
+            labels = tuple((k, "← 监控" if k == "monitor" else lb) for k, lb in PAGE_LABELS)
+        out = {}
+        for key, label in labels:
+            f = T.font(10, key == self._page)
+            w = QFontMetrics(f).horizontalAdvance(label) + 24
+            out[key] = (x, w)
+            x += w + 6
+        return out
+
+    def _start_tab_anim(self) -> None:
+        tgt = self._tab_rects().get(self._page)
+        if tgt is None:
+            return
+        if self._tab_ind is None:
+            self._tab_ind = (float(tgt[0]), float(tgt[1]))
+            return
+        if abs(self._tab_ind[0] - tgt[0]) < 0.4 and abs(self._tab_ind[1] - tgt[1]) < 0.4:
+            self._tab_ind = (float(tgt[0]), float(tgt[1]))
+            return
+        self._tab_from = (self._tab_ind[0], self._tab_ind[1])
+        self._tab_to = (float(tgt[0]), float(tgt[1]))
+        self._tab_anim.stop()
+        self._tab_anim.start()
+
+    def _on_content_fx(self, v) -> None:
+        self._content_op = float(v)
+        self.update()
+
+    def _on_stagger_fx(self, v) -> None:
+        self._stagger = float(v)
+        self.update()
+
+    def _on_page_fx(self, v) -> None:
+        self._page_op = float(v)
+        self.update()
+
+    def _play_content_fx(self, opening: bool) -> None:
+        self._fx.stop()
+        self._fx_card.stop()
+        if opening:
+            self._fx.setDuration(220)
+            self._fx.setStartValue(0.0)
+            self._fx.setEndValue(1.0)
+            self._fx.start()
+            self._stagger = 0.0
+            QTimer.singleShot(40, self._fx_card.start)
+        else:
+            self._fx.setDuration(140)
+            self._fx.setStartValue(self._content_op)
+            self._fx.setEndValue(0.0)
+            self._fx.start()
+
+    def _play_page_fx(self) -> None:
+        self._page_fx.stop()
+        self._page_op = 0.0
+        self._page_fx.start()
+
+    def _card_op(self, index: int) -> float:
+        """卡片错峰：第 index 张在第 index*0.11 的进度之后才起，4 张依次铺开。"""
+        s = self._stagger
+        start = index * 0.11
+        span = 0.6
+        return max(0.0, min(1.0, (s - start) / span)) * self._content_op
 
     def _snap_on_release(self) -> bool:
         """松手时如果胶囊已经贴近屏幕顶部，就吸回顶部居中。"""
@@ -612,7 +745,33 @@ class IslandWindow(QWidget):
             self._set_anchor_here()
 
     def _animate_to(self, expanded: bool) -> None:
-        self._expanded = expanded
+        if expanded:
+            if self._collapse_anim.isActive():
+                self._collapse_anim.stop()
+            if self._expanded and self._content_op >= 0.99 and self._page_op >= 0.99:
+                self._resize_to(True)      # 已经展开着切页，只补一次尺寸/位置
+                return
+            opening = not self._expanded or self._content_op < 0.99
+            self._expanded = True
+            self._page_op = 1.0
+            if opening:
+                self._play_content_fx(True)
+            self._resize_to(True)
+            return
+
+        # 收起：先让面板内容淡出，再切成胶囊并收缩（否则会闪一下新布局）
+        if self._expanded and not self._collapse_anim.isActive():
+            self._play_content_fx(False)
+            self._collapse_anim.start()
+            return
+        self._expanded = False
+        self._resize_to(False)
+
+    def _apply_collapse(self) -> None:
+        self._expanded = False
+        self._resize_to(False)
+
+    def _resize_to(self, expanded: bool) -> None:
         size = self._content_size(expanded)
         cur = self.geometry()
         # 展开/收起只改尺寸，水平中心永远回到锚点，不拿当前几何反推（否则 1px 取舍会累积）
@@ -626,6 +785,7 @@ class IslandWindow(QWidget):
 
         self._anim.stop()
         self._anim.setDuration(240)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.setStartValue(cur)
         self._anim.setEndValue(target)
         self._anim.start()
@@ -654,7 +814,9 @@ class IslandWindow(QWidget):
             self._set_activatable(False)
             self._save_note_now()
         self._sync_workers()
+        self._start_tab_anim()
         if self._expanded:
+            self._play_page_fx()
             self._animate_to(True)
         else:
             self.update()
@@ -1222,7 +1384,8 @@ class IslandWindow(QWidget):
     # ================================================================== 鼠标
     def enterEvent(self, e) -> None:
         self._collapse_timer.stop()
-        if not self._expanded:
+        # 正在淡出（130ms 的过渡期）时回来，也要立刻取消收起并重新淡入
+        if not self._expanded or self._content_op < 0.99 or self._collapse_anim.isActive():
             self._animate_to(True)
         super().enterEvent(e)
 
@@ -1424,27 +1587,58 @@ class IslandWindow(QWidget):
         if not self._expanded:
             return
         delta = -1 if e.angleDelta().y() > 0 else 1
+        if not self._scroll_step(delta):
+            return
+        # 松手后靠惯性再滑一点，滚轮才不显得「一格一格硬跳」
+        self._scroll_vel += delta * 2.2
+        self._inertia.start()
+        self.update()
+
+    def _scroll_step(self, delta: int) -> bool:
+        """把列表滚动 delta 行，越界就夹住；返回是否真的动了。"""
         if self._page == "process":
             rows = self._visible_procs()
             visible = self._visible_rows()
             max_scroll = max(0, len(rows) - visible)
-            self._proc_scroll = min(max(self._proc_scroll + delta, 0), max_scroll)
-        elif self._page == "music":
+            cur = self._proc_scroll
+            self._proc_scroll = min(max(cur + delta, 0), max_scroll)
+            return self._proc_scroll != cur
+        if self._page == "music":
             visible = self._lib_visible()
             max_scroll = max(0, len(self._lib) - visible)
-            self._lib_scroll = min(max(self._lib_scroll + delta, 0), max_scroll)
-        elif self._page == "clipboard":
+            cur = self._lib_scroll
+            self._lib_scroll = min(max(cur + delta, 0), max_scroll)
+            return self._lib_scroll != cur
+        if self._page == "clipboard":
             items = self._clip.items if self._clip is not None else []
             visible = self._clip_visible()
             max_scroll = max(0, len(items) - visible)
-            self._clip_scroll = min(max(self._clip_scroll + delta, 0), max_scroll)
-        elif self._page == "notes":
+            cur = self._clip_scroll
+            self._clip_scroll = min(max(cur + delta, 0), max_scroll)
+            return self._clip_scroll != cur
+        if self._page == "notes":
             visible = self._note_visible()
             max_scroll = max(0, len(self._note_filtered()) - visible)
-            self._note_scroll = min(max(self._note_scroll + delta, 0), max_scroll)
-        else:
+            cur = self._note_scroll
+            self._note_scroll = min(max(cur + delta, 0), max_scroll)
+            return self._note_scroll != cur
+        return False
+
+    def _on_inertia(self) -> None:
+        if abs(self._scroll_vel) < 0.35:
+            self._inertia.stop()
             return
-        self.update()
+        self._scroll_acc += self._scroll_vel
+        step = int(self._scroll_acc)
+        if step:
+            if not self._scroll_step(step):
+                self._inertia.stop()
+                self._scroll_vel = 0.0
+                self._scroll_acc = 0.0
+                return
+            self._scroll_acc -= step
+            self.update()
+        self._scroll_vel *= 0.74
 
     def _save_position(self) -> None:
         """存「收起态」的左上角，且水平按中心换算。
@@ -1581,9 +1775,17 @@ class IslandWindow(QWidget):
         self._clip_hits = []
 
         if not self._expanded:
+            p.setOpacity(max(0.0, min(1.0, self._content_op)))
             self._paint_collapsed(p, body)
+            p.setOpacity(1.0)
         else:
+            op = max(0.0, min(1.0, self._content_op))
+            p.setOpacity(op)
             self._paint_header(p, body)
+            # 页面额外叠一层淡入 + 轻微上浮，切页时不会「啪」地一下换了
+            page_op = max(0.0, min(1.0, self._page_op))
+            p.setOpacity(op * page_op)
+            p.translate(0, (1.0 - page_op) * 6.0)
             if self._page == "monitor":
                 self._paint_monitor(p, body)
             elif self._page == "process":
@@ -1594,6 +1796,8 @@ class IslandWindow(QWidget):
                 self._paint_notes(p, body)
             else:
                 self._paint_music(p, body)
+            p.translate(0, -(1.0 - page_op) * 6.0)
+            p.setOpacity(1.0)
 
         if self._toast:
             self._paint_toast(p, body)
@@ -1615,10 +1819,28 @@ class IslandWindow(QWidget):
     def _paint_body(self, p: QPainter, body: QRectF, radius: float) -> None:
         grad = QLinearGradient(body.topLeft(), body.bottomLeft())
         grad.setColorAt(0.0, T.BG_TOP)
+        grad.setColorAt(0.55, QColor(
+            int(T.BG_TOP.red() * 0.45 + T.BG_BOTTOM.red() * 0.55),
+            int(T.BG_TOP.green() * 0.45 + T.BG_BOTTOM.green() * 0.55),
+            int(T.BG_TOP.blue() * 0.45 + T.BG_BOTTOM.blue() * 0.55),
+            T.BG_BOTTOM.alpha(),
+        ))
         grad.setColorAt(1.0, T.BG_BOTTOM)
         path = QPainterPath()
         path.addRoundedRect(body, radius, radius)
         p.fillPath(path, QBrush(grad))
+
+        # 顶部内高光：一条中间亮、两头淡的 1px 白线，玻璃感全靠它
+        hl_grad = QLinearGradient(body.left(), body.top(), body.right(), body.top())
+        hl_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        hl_grad.setColorAt(0.35, QColor(255, 255, 255, 46))
+        hl_grad.setColorAt(0.5, QColor(255, 255, 255, 58))
+        hl_grad.setColorAt(0.65, QColor(255, 255, 255, 46))
+        hl_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setPen(QPen(QBrush(hl_grad), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawLine(QPointF(body.left() + radius, body.top() + 0.5),
+                   QPointF(body.right() - radius, body.top() + 0.5))
 
         hl = QPainterPath()
         hl.addRoundedRect(body.adjusted(1, 1, -1, -1), max(radius - 1, 2), max(radius - 1, 2))
@@ -1722,6 +1944,14 @@ class IslandWindow(QWidget):
             p.setBrush(c)
             x = rect.left() + slot * i + (slot - bw) / 2
             p.drawRoundedRect(QRectF(x, rect.bottom() - h, bw, h), bw / 2, bw / 2)
+            pk = self._peak[i] if i < len(self._peak) else 0.0
+            if pk > 0.08:
+                ph = 1.8 + pk * max(1.0, rect.height() - 1.8)
+                pc = self._spectrum_color(i / max(1, n - 1))
+                pc.setAlpha(55)
+                p.setBrush(pc)
+                p.drawRoundedRect(
+                    QRectF(x, rect.bottom() - ph - 0.8, bw, 1.4), 0.7, 0.7)
 
     def _paint_spec(self, p: QPainter, rect: QRectF) -> None:
         """音乐页的 32 根频谱柱。"""
@@ -1737,6 +1967,15 @@ class IslandWindow(QWidget):
             p.setBrush(c)
             x = rect.left() + slot * i + (slot - bw) / 2
             p.drawRoundedRect(QRectF(x, rect.bottom() - h, bw, h), bw / 2, bw / 2)
+            # 峰值保持：顶端留一截淡色
+            pk = self._peak[i] if i < len(self._peak) else 0.0
+            if pk > 0.06:
+                ph = 2.5 + pk * max(1.0, rect.height() - 2.5)
+                pc = self._spectrum_color(i / max(1, n - 1))
+                pc.setAlpha(70)
+                p.setBrush(pc)
+                p.drawRoundedRect(
+                    QRectF(x, rect.bottom() - ph - 1.2, bw, 2.2), 1.1, 1.1)
 
     # ------------------------------------------------------------ 标题栏
     def _paint_header(self, p: QPainter, body: QRectF) -> None:
@@ -1759,18 +1998,31 @@ class IslandWindow(QWidget):
             )
         for key, label in labels:
             active = key == self._page
-            p.setFont(T.font(10, active))
+            p.setFont(T.font(10, active, spacing=0.3))
             w = QFontMetrics(p.font()).horizontalAdvance(label) + 24
             rect = QRectF(x, top + 2, w, 22)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 34) if active else QColor(255, 255, 255, 0))
+            # hover 只给一点点底面提示，当前页靠下面的下划线说话
+            p.setBrush(QColor(255, 255, 255, 10) if active else QColor(0, 0, 0, 0))
             rp = QPainterPath()
             rp.addRoundedRect(rect, 11, 11)
             p.drawPath(rp)
-            p.setPen(T.TEXT if active else T.DIM)
+            p.setPen(T.TEXT if active else T.MUTED)
             p.drawText(rect, Qt.AlignCenter, label)
             self._tab_hits[key] = rect
+            if active:
+                self._tab_active = (rect.left(), rect.width())
             x += w + 6
+
+        # 2px 下划线指示器：切页时滑过去，而不是整块 pill 跳一下
+        ind = self._tab_ind
+        if ind is None:
+            ind = getattr(self, "_tab_active", (x, 40))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 120))
+        p.drawRoundedRect(
+            QRectF(ind[0] + 6, top + 24.5, max(8.0, ind[1] - 12), 2.0), 1.0, 1.0
+        )
 
         p.setFont(T.font(11))
         p.setPen(T.MUTED)
@@ -1790,10 +2042,10 @@ class IslandWindow(QWidget):
     # ------------------------------------------------------------ 监控页
     def _paint_monitor(self, p: QPainter, body: QRectF) -> None:
         d = self._data
-        pad = 18
+        pad = 16
         inner = body.adjusted(pad, pad + 40, -pad, -pad)
 
-        gap = 12
+        gap = 10
         card_w = (inner.width() - gap) / 2.0
         card_h = 100.0
 
@@ -1829,59 +2081,80 @@ class IslandWindow(QWidget):
                 card_w,
                 card_h,
             )
+            op = self._card_op(i)
+            if op <= 0.02:
+                continue
+            p.save()
+            p.setOpacity(p.opacity() * op)
+            p.translate(0, (1.0 - op) * 5.0)
             self._paint_card(p, r, *card)
+            p.restore()
             self._card_hits[CARD_SORTS[i]] = r
 
         bar_top = inner.top() + 2 * card_h + gap + 6
         bar = QRectF(inner.left(), bar_top, inner.width(), inner.bottom() - bar_top)
-        p.setPen(Qt.NoPen)
-        p.setBrush(T.CARD_BG)
-        bg = QPainterPath()
-        bg.addRoundedRect(bar, 14, 14)
-        p.drawPath(bg)
-        self._paint_io(p, bar, d)
+        bar_op = self._card_op(len(cards))
+        if bar_op > 0.02:
+            p.save()
+            p.setOpacity(p.opacity() * bar_op)
+            p.translate(0, (1.0 - bar_op) * 5.0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(T.CARD_BG)
+            bg = QPainterPath()
+            bg.addRoundedRect(bar, 18, 18)
+            p.drawPath(bg)
+            self._paint_io(p, bar, d)
+            p.restore()
 
     def _paint_card(self, p, rect, title, pct, value_text, sub_text, color, hist) -> None:
         p.setPen(Qt.NoPen)
         p.setBrush(T.CARD_BG)
         path = QPainterPath()
-        path.addRoundedRect(rect, 14, 14)
+        path.addRoundedRect(rect, 18, 18)
         p.drawPath(path)
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 16), 1.0))
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1.0))
         p.drawPath(path)
 
-        x_inset = 14
-        p.setFont(T.font(10))
+        x_inset = 16
+        p.setFont(T.font(10, spacing=0.2))
         p.setPen(T.MUTED)
-        p.drawText(QRectF(rect.left() + x_inset, rect.top() + 12, 120, 16),
+        p.drawText(QRectF(rect.left() + x_inset, rect.top() + 13, 120, 16),
                    Qt.AlignLeft | Qt.AlignVCenter, title)
 
-        p.setFont(T.font(23, True, True))
+        p.setFont(T.font(23, True, True, spacing=-0.3))
         p.setPen(T.load_color(pct, color))
-        p.drawText(QRectF(rect.right() - x_inset - 120, rect.top() + 8, 120, 30),
+        p.drawText(QRectF(rect.right() - x_inset - 120, rect.top() + 9, 120, 30),
                    Qt.AlignRight | Qt.AlignVCenter, value_text)
 
         p.setFont(T.font(9))
         p.setPen(T.DIM)
         fm = QFontMetrics(p.font())
         sub = fm.elidedText(sub_text, Qt.ElideRight, int(rect.width() - x_inset * 2 - 54))
-        p.drawText(QRectF(rect.left() + x_inset, rect.top() + 36, rect.width() - x_inset * 2 - 54, 14),
+        p.drawText(QRectF(rect.left() + x_inset, rect.top() + 37, rect.width() - x_inset * 2 - 54, 14),
                    Qt.AlignLeft | Qt.AlignVCenter, sub)
 
         # 卡片是进程列表的入口：右下角给个提示
         p.setPen(T.DIM)
-        p.drawText(QRectF(rect.right() - x_inset - 54, rect.top() + 36, 54, 14),
+        p.drawText(QRectF(rect.right() - x_inset - 54, rect.top() + 37, 54, 14),
                    Qt.AlignRight | Qt.AlignVCenter, "进程 ›")
 
-        spark = QRectF(rect.left() + x_inset, rect.top() + 54,
-                       rect.width() - x_inset * 2, rect.height() - 54 - 12)
+        spark = QRectF(rect.left() + x_inset, rect.top() + 55,
+                       rect.width() - x_inset * 2, rect.height() - 55 - 14)
         self._paint_spark(p, spark, hist, color)
 
+        # 卡底一条 2px 分类色细条，比胶囊底边四段条更克制
+        strip = QRectF(rect.left() + x_inset, rect.bottom() - 7.5,
+                       rect.width() - x_inset * 2, 2.0)
+        c = T.load_color(pct, color)
+        c.setAlpha(165)
+        p.setPen(Qt.NoPen)
+        p.setBrush(c)
+        p.drawRoundedRect(strip, 1.0, 1.0)
+
     def _paint_spark(self, p, rect, hist, color) -> None:
-        p.setPen(QPen(QColor(255, 255, 255, 18), 1.0))
-        p.drawLine(rect.bottomLeft(), rect.bottomRight())
-        p.setPen(QPen(QColor(255, 255, 255, 10), 1.0))
+        # 底线交给卡片底部那条分类色，这里只留一条 75% 参考线
+        p.setPen(QPen(QColor(255, 255, 255, 12), 1.0))
         y75 = rect.bottom() - rect.height() * 0.75
         p.drawLine(QPointF(rect.left(), y75), QPointF(rect.right(), y75))
 
@@ -1907,16 +2180,16 @@ class IslandWindow(QWidget):
 
         g = QLinearGradient(0, rect.top(), 0, rect.bottom())
         c_top = QColor(color)
-        c_top.setAlpha(46)
+        c_top.setAlpha(76)
         c_bottom = QColor(color)
-        c_bottom.setAlpha(0)
+        c_bottom.setAlpha(6)
         g.setColorAt(0.0, c_top)
         g.setColorAt(1.0, c_bottom)
         p.setPen(Qt.NoPen)
         p.fillPath(fill, QBrush(g))
 
         pen = QPen(QColor(color))
-        pen.setWidthF(1.5)
+        pen.setWidthF(1.4)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
         p.drawPath(line)
@@ -1936,12 +2209,14 @@ class IslandWindow(QWidget):
                 p.setPen(QPen(QColor(255, 255, 255, 18), 1.0))
                 p.drawLine(QPointF(bar.left() + slot_w * i, bar.top() + 8),
                            QPointF(bar.left() + slot_w * i, bar.bottom() - 8))
+            # 数值 20 + 标签 14 = 34，按整块垂直居中（+2 补字体基线的视觉下沉）
+            top0 = bar.top() + (bar.height() - 34) / 2.0 + 2.0
             p.setFont(T.font(12, True, True))
             p.setPen(color)
-            p.drawText(QRectF(cx - 60, bar.top() + 2, 120, 20), Qt.AlignCenter, value)
+            p.drawText(QRectF(cx - 60, top0, 120, 20), Qt.AlignCenter, value)
             p.setFont(T.font(9))
             p.setPen(T.DIM)
-            p.drawText(QRectF(cx - 40, bar.top() + 20, 80, 14), Qt.AlignCenter, f"{icon} {label}")
+            p.drawText(QRectF(cx - 40, top0 + 20, 80, 14), Qt.AlignCenter, f"{icon} {label}")
             self._io_hits[key] = QRectF(bar.left() + slot_w * i, bar.top(), slot_w, bar.height())
 
     # ------------------------------------------------------------ 进程页

@@ -22,6 +22,7 @@ notes/
 
 # 开发期探针脚本（路径写死了本机，没必要进仓库）
 tools/*_probe.py
+tools/*_stress.py
 tools/*_debug.py
 tools/fs_fake.py
 tools/pot_*.py

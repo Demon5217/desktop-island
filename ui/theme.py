@@ -9,10 +9,10 @@ from __future__ import annotations
 from PySide6.QtGui import QColor, QFont
 
 # ---------- 配色 ----------
-BG_TOP = QColor(28, 30, 36, 242)      # 胶囊顶部（略亮）
-BG_BOTTOM = QColor(11, 12, 16, 242)   # 胶囊底部（更深）
-STROKE = QColor(255, 255, 255, 28)    # 内描边，给出玻璃边缘感
-CARD_BG = QColor(255, 255, 255, 12)   # 展开态卡片底色
+BG_TOP = QColor(34, 37, 45, 244)      # 胶囊顶部（略亮，玻璃高光带）
+BG_BOTTOM = QColor(9, 10, 14, 244)    # 胶囊底部（更深，压出体积感）
+STROKE = QColor(255, 255, 255, 30)    # 内描边，给出玻璃边缘感
+CARD_BG = QColor(255, 255, 255, 13)   # 展开态卡片底色
 TEXT = QColor(232, 234, 240)
 MUTED = QColor(138, 143, 163)
 DIM = QColor(92, 97, 115)
@@ -29,12 +29,23 @@ FAMILY_UI = ["Microsoft YaHei UI", "Segoe UI Variable", "Segoe UI"]
 FAMILY_NUM = ["Bahnschrift", "Segoe UI Variable Display", "Microsoft YaHei UI"]
 
 
-def font(size: int, bold: bool = False, numeric: bool = False) -> QFont:
-    """取一个字体对象。numeric=True 时数字用 Bahnschrift，看着更有仪表感。"""
+def font(size: int, bold: bool = False, numeric: bool = False,
+         spacing: float = 0.0, weight: int = -1) -> QFont:
+    """取一个字体对象。
+
+    numeric=True 时数字用 Bahnschrift，看着更有仪表感；
+    spacing 收紧/放开字距（数字排版常要 -0.2 左右的负字距）；
+    weight 传 0-100 可覆盖字重（-1 表示只用 bold 开关）。
+    """
     f = QFont()
     f.setFamilies(FAMILY_NUM if numeric else FAMILY_UI)
     f.setPixelSize(size)
-    f.setBold(bold)
+    if weight >= 0:
+        f.setWeight(QFont.Weight(int(weight)))
+    else:
+        f.setBold(bold)
+    if spacing:
+        f.setLetterSpacing(QFont.AbsoluteSpacing, spacing)
     return f
 
 
