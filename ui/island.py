@@ -112,7 +112,7 @@ RATE_FOCUS = {"net_up", "net_down", "disk_r", "disk_w"}
 class IslandWindow(QWidget):
     INSET = 12
     SNAP_DIST = 40          # 胶囊顶边离屏幕顶小于这个距离，松手就吸回顶部居中
-    COLLAPSED_W = 520
+    COLLAPSED_W = 480
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
     PAGE_SIZES = {
@@ -265,6 +265,7 @@ class IslandWindow(QWidget):
             pass
         self.setAcceptDrops(True)
 
+        self._anchor_cx = None      # 胶囊的水平中心锚点（展开/收起都以它为基准）
         self._restore_geometry()
         self._on_tick()
 
@@ -513,8 +514,19 @@ class IslandWindow(QWidget):
             return self.COLLAPSED_H_PLAY
         return self.COLLAPSED_H_IDLE
 
+    def _x_for_width(self, width: int) -> int:
+        """按锚点中心算出某个宽度下的左上角 x（不靠当前几何反推，避免累积误差）。"""
+        cx = self._anchor_cx
+        if cx is None:
+            cx = self.x() + self.width() / 2.0
+            self._anchor_cx = cx
+        return int(round(cx - width / 2.0))
+
+    def _set_anchor_here(self) -> None:
+        self._anchor_cx = self.x() + self.width() / 2.0
+
     def _sync_collapsed_size(self) -> None:
-        """播放状态变化时，收起胶囊的高度跟着变（宽度不动、顶部对齐）。"""
+        """播放状态变化时，收起胶囊的高度跟着变（水平中心不动、顶部对齐）。"""
         if self._expanded or self._dragging:
             return
         size = self._content_size(False)
@@ -522,7 +534,8 @@ class IslandWindow(QWidget):
         if g.width() == size.width() and g.height() == size.height():
             return
         self._anim.stop()
-        self.setGeometry(QRect(g.x(), g.y(), size.width(), size.height()))
+        self.setGeometry(QRect(self._x_for_width(size.width()), g.y(),
+                               size.width(), size.height()))
         self.update()
 
     def _restore_geometry(self) -> None:
@@ -534,7 +547,9 @@ class IslandWindow(QWidget):
         except Exception:
             pos = None
         if pos and isinstance(pos, list) and len(pos) == 2:
-            self.setGeometry(QRect(int(pos[0]), int(pos[1]), size.width(), size.height()))
+            x, y = int(pos[0]), int(pos[1])
+            self.setGeometry(QRect(x, y, size.width(), size.height()))
+            self._anchor_cx = x + size.width() / 2.0
             self._clamp_into_screen()
             return
         self._place_default()
@@ -544,17 +559,21 @@ class IslandWindow(QWidget):
         size = self._content_size(False)
         screen = self.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
-        x = geo.center().x() - size.width() // 2
+        cx = geo.left() + geo.width() / 2.0
+        x = int(round(cx - size.width() / 2.0))
         y = geo.top()
         self.setGeometry(QRect(x, y, size.width(), size.height()))
+        self._anchor_cx = cx
 
     def snap_to_top(self, animate: bool = False) -> None:
         """归位到顶部居中；animate=True 时带一段回弹动画。"""
-        size = QSize(self.width(), self.height())
+        size = self.width()
         screen = self.screen() or QApplication.primaryScreen()
         geo = screen.availableGeometry()
-        target = QRect(geo.center().x() - size.width() // 2, geo.top(),
-                       size.width(), size.height())
+        cx = geo.left() + geo.width() / 2.0
+        self._anchor_cx = cx
+        x = int(round(cx - size / 2.0))
+        target = QRect(x, geo.top(), self.width(), self.height())
         if not animate or self.geometry() == target:
             self._anim.stop()
             self.setGeometry(target)
@@ -588,14 +607,17 @@ class IslandWindow(QWidget):
         g = self.geometry()
         x = min(max(g.x(), a.left() - self.INSET), a.right() - g.width() + self.INSET)
         y = min(max(g.y(), a.top()), a.bottom() - self.INSET)
-        self.move(x, y)
+        if x != g.x() or y != g.y():
+            self.move(x, y)
+            self._set_anchor_here()
 
     def _animate_to(self, expanded: bool) -> None:
         self._expanded = expanded
         size = self._content_size(expanded)
         cur = self.geometry()
-        target = QRect(0, 0, size.width(), size.height())
-        target.moveTopLeft(QPoint(cur.center().x() - size.width() // 2, cur.top()))
+        # 展开/收起只改尺寸，水平中心永远回到锚点，不拿当前几何反推（否则 1px 取舍会累积）
+        target = QRect(self._x_for_width(size.width()), cur.top(),
+                       size.width(), size.height())
 
         screen = self.screen() or QApplication.primaryScreen()
         a = screen.availableGeometry()
@@ -1392,6 +1414,7 @@ class IslandWindow(QWidget):
         if self._dragging:
             self._dragging = False
             self._drag_offset = None
+            self._set_anchor_here()
             if not self._snap_on_release():
                 self._save_position()
             self._collapse_timer.start()
@@ -1424,13 +1447,20 @@ class IslandWindow(QWidget):
         self.update()
 
     def _save_position(self) -> None:
+        """存「收起态」的左上角，且水平按中心换算。
+
+        展开面板比胶囊宽，直接存窗口左上角会让下次启动整体偏一侧
+        （早先就是这样：展开宽度 664、收起 544，差出的 60px 每次都被钉在左边）。
+        """
         try:
             os.makedirs(CFG_DIR, exist_ok=True)
             cfg = {}
             if os.path.exists(CFG_PATH):
                 with open(CFG_PATH, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-            cfg["pos"] = [self.x(), self.y()]
+            cw = self._content_size(False).width()
+            cx = (self.x() + self.width() // 2) - cw // 2
+            cfg["pos"] = [int(cx), int(self.y())]
             with open(CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -1601,7 +1631,7 @@ class IslandWindow(QWidget):
         d = self._data
         tall = body.height() > 58.0  # 有音乐时胶囊更高，指标行上移给频谱让位
         cy = body.top() + (11 if tall else 21)
-        margin = 26
+        margin = 20
         left = body.left() + margin
 
         cpu = d.get("cpu", 0.0) or 0.0
@@ -1633,7 +1663,7 @@ class IslandWindow(QWidget):
             p.setPen(T.load_color(pct, color))
             vw = QFontMetrics(vf).horizontalAdvance(value)
             p.drawText(QRectF(x, cy - 12, vw + 2, 24), Qt.AlignLeft | Qt.AlignVCenter, value)
-            x += vw + 16
+            x += vw + 12
 
         # 右侧：有音乐就显示歌名，否则显示网速
         right_w = body.right() - margin - (x + 8)
@@ -1650,7 +1680,7 @@ class IslandWindow(QWidget):
         else:
             up = T.fmt_rate(d.get("net_up", 0.0))
             down = T.fmt_rate(d.get("net_down", 0.0))
-            p.setFont(T.font(10, False, True))
+            p.setFont(T.font(9, False, True))
             p.setPen(T.NET)
             p.drawText(rect, Qt.AlignRight | Qt.AlignVCenter, f"↑ {up}   ↓ {down}")
 
