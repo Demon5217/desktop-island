@@ -769,7 +769,12 @@ class IslandWindow(QWidget):
 
     def _apply_collapse(self) -> None:
         self._expanded = False
+        # 淡出只为「面板退场」服务，切回胶囊后必须复位，否则胶囊会一直是 0 透明度
+        self._fx.stop()
+        self._content_op = 1.0
+        self._page_op = 1.0
         self._resize_to(False)
+        self.update()
 
     def _resize_to(self, expanded: bool) -> None:
         size = self._content_size(expanded)
