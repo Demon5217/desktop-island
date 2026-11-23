@@ -10,8 +10,10 @@ UI 线程只负责画，永远不做 IO / 系统调用，这样动画才不会�
 """
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
+from ctypes import wintypes
 from typing import Optional
 
 import psutil
@@ -21,6 +23,51 @@ try:
     import pynvml
 except Exception:  # 没装 nvidia-ml-py 也不影响其它指标
     pynvml = None
+
+
+class _PerfInfo(ctypes.Structure):
+    """psapi.GetPerformanceInfo 的结构体（提交内存、页文件、物理内存都在这里）。"""
+
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("CommitTotal", ctypes.c_size_t),
+        ("CommitLimit", ctypes.c_size_t),
+        ("CommitPeak", ctypes.c_size_t),
+        ("PhysicalTotal", ctypes.c_size_t),
+        ("PhysicalAvailable", ctypes.c_size_t),
+        ("SystemCache", ctypes.c_size_t),
+        ("KernelTotal", ctypes.c_size_t),
+        ("KernelPaged", ctypes.c_size_t),
+        ("KernelNonpaged", ctypes.c_size_t),
+        ("PageSize", ctypes.c_size_t),
+        ("HandleCount", wintypes.DWORD),
+        ("ProcessCount", wintypes.DWORD),
+        ("ThreadCount", wintypes.DWORD),
+    ]
+
+
+def read_commit() -> dict:
+    """读提交内存（Commit）与页文件用量，不需要管理员权限。
+
+    返回 GB：commit_used / commit_limit / pagefile_total / pagefile_used。
+    """
+    out = {}
+    try:
+        pi = _PerfInfo()
+        pi.cb = ctypes.sizeof(_PerfInfo)
+        if ctypes.windll.psapi.GetPerformanceInfo(ctypes.byref(pi), pi.cb):
+            gb = pi.PageSize / float(2 ** 30)      # PageSize 单位是字节
+            out["commit_used"] = pi.CommitTotal * gb
+            out["commit_limit"] = pi.CommitLimit * gb
+    except Exception:
+        return out
+    try:
+        swap = psutil.swap_memory()
+        out["pagefile_total"] = swap.total / float(2 ** 30)
+        out["pagefile_used"] = swap.used / float(2 ** 30)
+    except Exception:
+        pass
+    return out
 
 
 class GpuReader:
@@ -144,6 +191,15 @@ class MetricsWorker(QThread):
                     "vram_total": self._gpu.total_gb,
                     "gpu_temp": None,
                 }
+                commit = read_commit()
+                if commit:
+                    limit = commit.get("commit_limit") or 0.0
+                    used = commit.get("commit_used") or 0.0
+                    data["commit_used"] = used
+                    data["commit_limit"] = limit
+                    data["commit_pct"] = (used / limit * 100.0) if limit else 0.0
+                    data["pagefile_total"] = commit.get("pagefile_total", 0.0)
+                    data["pagefile_used"] = commit.get("pagefile_used", 0.0)
                 gpu = self._gpu.read()
                 if gpu:
                     data.update(gpu)

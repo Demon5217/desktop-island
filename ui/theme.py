@@ -23,6 +23,7 @@ RAM = QColor(52, 211, 153)    # 绿
 VRAM = QColor(244, 114, 182)  # 粉
 NET = QColor(251, 146, 60)    # 橙
 DISK = QColor(96, 165, 250)   # 蓝
+COMMIT = QColor(245, 197, 66)  # 金黄（提交内存 / 页文件）
 WARN = QColor(248, 113, 113)  # 高负载提示色
 
 FAMILY_UI = ["Microsoft YaHei UI", "Segoe UI Variable", "Segoe UI"]
