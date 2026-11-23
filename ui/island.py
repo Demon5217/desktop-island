@@ -2090,18 +2090,23 @@ class IslandWindow(QWidget):
                 if fill > 1.0:
                     p.drawRoundedRect(QRectF(bar_x, block_top + bar_h - fill, bar_w, fill),
                                       1.5, 1.5)
-            p.setFont(lf)
-            p.setPen(T.MUTED)
-            p.drawText(QRectF(tx, block_top, tw, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
             if label == "磁盘":
-                # 竖版一行放不下两种速率，缩到 8px 单行写 R/W
+                # 不写“磁盘”两个字，改成上方一条淡分隔线；速率单行垂直居中
+                row_top = body.top() + pad_top + row_h * i
+                p.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
+                p.setBrush(Qt.NoBrush)
+                p.drawLine(QPointF(body.left() + 11.0, row_top + 1.0),
+                           QPointF(body.right() - 11.0, row_top + 1.0))
                 p.setFont(vf_small)
                 p.setPen(T.DISK)
-                p.drawText(QRectF(tx, block_top + 13, tw, 14),
+                p.drawText(QRectF(tx, row_top, tw, row_h),
                            Qt.AlignLeft | Qt.AlignVCenter,
                            f"R{self._brief_rate(d.get('disk_r', 0.0))} "
                            f"W{self._brief_rate(d.get('disk_w', 0.0))}")
                 continue
+            p.setFont(lf)
+            p.setPen(T.MUTED)
+            p.drawText(QRectF(tx, block_top, tw, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
             small = label in ("NET", "磁盘")
             p.setFont(vf_small if small else vf)
             p.setPen(color if small else T.load_color(pct, color))
