@@ -100,6 +100,7 @@ FOCUS_META = {
     "cpu": "CPU",
     "gpu": "GPU",
     "mem": "内存",
+    "commit": "提交内存",
     "vram": "显存",
     "net_up": "上传",
     "net_down": "下载",
@@ -219,7 +220,7 @@ class IslandWindow(QWidget):
         self._hold_open = False
         self._pot_bg = True
         self._confirm_hits: dict = {}
-        self._card_hits: dict = {}
+        self._card_hits: list = []      # [(rect, key)]：两张卡可能共用同一个排序键，不能用 dict
         self._io_hits: dict = {}
 
         self._anim = QPropertyAnimation(self, b"geometry", self)
@@ -1491,7 +1492,7 @@ class IslandWindow(QWidget):
 
         if self._page == "monitor":
             # 点哪张卡片，就按哪个指标排序看进程
-            for key, rect in self._card_hits.items():
+            for rect, key in self._card_hits:
                 if rect.contains(pos):
                     self._open_process_for(key)
                     return True
@@ -1767,6 +1768,8 @@ class IslandWindow(QWidget):
             rows = [r for r in rows if r["gpu"] >= 0.5]
         elif f == "vram":
             rows = [r for r in rows if r["vram"] >= 1]
+        elif f == "commit":
+            rows = [r for r in rows if r.get("commit", 0.0) >= 1]
         elif f in ("net_up", "net_down"):
             if self._net_is_conn():
                 rows = [r for r in rows if r["conns"]]
@@ -2304,7 +2307,7 @@ class IslandWindow(QWidget):
              T.COMMIT, self._hist["commit"],
              f"页文件 {d.get('pagefile_used', 0.0):.2f} / {d.get('pagefile_total', 0.0):.0f} GB"
              if d.get("pagefile_total") else None,
-             "mem", pf_sub3, pf or None),
+             "commit", pf_sub3, pf or None),
         ]
 
         self._card_hits.clear()
@@ -2324,7 +2327,7 @@ class IslandWindow(QWidget):
             self._paint_card(p, r, title, pct, value, sub, color, hist, sub2,
                              sub3, pfiles)
             p.restore()
-            self._card_hits[sort_key] = r
+            self._card_hits.append((r, sort_key))
 
         bar_top = inner.top() + top_h + gap + bot_h + 6
         bar = QRectF(inner.left(), bar_top, inner.width(), inner.bottom() - bar_top)
@@ -2536,6 +2539,7 @@ class IslandWindow(QWidget):
             empty_text = {
                 "gpu": "当前没有进程在占用 GPU",
                 "vram": "当前没有进程占用显存",
+                "commit": "当前没有进程占用提交内存",
                 "net_up": "当前没有进程在收发数据",
                 "net_down": "当前没有进程在收发数据",
                 "disk_r": "当前没有进程在读盘",
@@ -2646,6 +2650,10 @@ class IslandWindow(QWidget):
             if v <= 0:
                 return "—", T.DIM
             return f"{v:.0f}M", T.RAM
+        if focus == "commit":
+            if v <= 0:
+                return "—", T.DIM
+            return T.fmt_mem(v), T.COMMIT
         if focus == "vram":
             if v < 1:
                 return "—", T.DIM

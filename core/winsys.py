@@ -184,6 +184,7 @@ class ProcessScanner:
                         "name": name,
                         "cpu": 0.0,
                         "mem": 0.0,
+                        "commit": 0.0,
                         "disk_r": 0.0,
                         "disk_w": 0.0,
                         "restricted": True,
@@ -209,8 +210,11 @@ class ProcessScanner:
                 pmc = PROCESS_MEMORY_COUNTERS()
                 pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
                 mem = 0.0
+                commit_mb = 0.0
                 if psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
                     mem = pmc.WorkingSetSize / 1024 ** 2
+                    # PagefileUsage 就是任务管理器的「提交大小」：该进程已提交的私有字节
+                    commit_mb = pmc.PagefileUsage / 1024 ** 2
 
                 # 磁盘读写：累计字节差分 → B/s，和任务管理器的"磁盘"列同源
                 disk_r = disk_w = 0.0
@@ -229,6 +233,7 @@ class ProcessScanner:
                         "name": name,
                         "cpu": min(cpu, 100.0),
                         "mem": mem,
+                        "commit": commit_mb,
                         "disk_r": disk_r,
                         "disk_w": disk_w,
                         "restricted": False,

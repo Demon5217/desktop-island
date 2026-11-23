@@ -144,6 +144,7 @@ class ProcessWorker(QThread):
                     "name": name,
                     "cpu": item["cpu"],
                     "mem": item["mem"],
+                    "commit": float(item.get("commit", 0.0)),
                     "gpu": float(g.get("gpu", 0.0)),
                     "vram": float(g.get("vram", 0.0)),
                     "net_up": up,
