@@ -2004,7 +2004,7 @@ class IslandWindow(QWidget):
                 p.drawText(QRectF(x + 8, cy - 12, avail, 24),
                            Qt.AlignLeft | Qt.AlignVCenter, net_txt)
 
-        # 底部：有声音就变成频谱律动，没声音回到占用条（CPU/GPU/RAM/VRAM 四段）
+        # 底部：有声音就变成频谱律动，没声音回到占用条（CPU/GPU/RAM/VRAM/提交 五段）
         bar_y = body.bottom() - 3
         if self._spec_level > 0.01 or media.get("playing"):
             self._paint_micro_spec(
@@ -2015,6 +2015,8 @@ class IslandWindow(QWidget):
         bar_h = 2.2
         gap = 6
         segs = [(pct, color) for _, _, pct, color in items]
+        if d.get("commit_limit"):
+            segs.append((float(d.get("commit_pct", 0.0) or 0.0), T.COMMIT))
         seg_w = (body.width() - margin * 2 - gap * (len(segs) - 1)) / float(len(segs))
         bx = left
         for pct, color in segs:
