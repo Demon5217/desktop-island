@@ -116,7 +116,7 @@ class IslandWindow(QWidget):
     COLLAPSED_W = 420        # 右端速率贴紧指标后按实测最宽内容定的宽，整体更紧凑
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
-    SIDE_W = 62             # 贴左右两侧时的竖向胶囊（本体尺寸，不含 INSET）
+    SIDE_W = 74             # 贴左右两侧时的竖向胶囊（本体尺寸，不含 INSET）；磁盘读写合并一行后要更宽
     SIDE_H = 300
     PAGE_SIZES = {
         "monitor": QSize(640, 350),
@@ -2004,7 +2004,7 @@ class IslandWindow(QWidget):
                 p.drawText(QRectF(x + 8, cy - 12, avail, 24),
                            Qt.AlignLeft | Qt.AlignVCenter, net_txt)
 
-        # 底部：有声音就变成频谱律动，没声音回到占用条（CPU/GPU/RAM/VRAM/读/写 六段）
+        # 底部：有声音就变成频谱律动，没声音回到占用条（CPU/GPU/RAM/VRAM 四段）
         bar_y = body.bottom() - 3
         if self._spec_level > 0.01 or media.get("playing"):
             self._paint_micro_spec(
@@ -2014,18 +2014,15 @@ class IslandWindow(QWidget):
             return
         bar_h = 2.2
         gap = 6
-        disk_pct_r = min(100.0, (d.get("disk_r", 0.0) or 0.0) / 104857600.0 * 100.0)
-        disk_pct_w = min(100.0, (d.get("disk_w", 0.0) or 0.0) / 104857600.0 * 100.0)
         segs = [(pct, color) for _, _, pct, color in items]
-        segs += [(disk_pct_r, T.DISK), (disk_pct_w, T.DISK)]
         seg_w = (body.width() - margin * 2 - gap * (len(segs) - 1)) / float(len(segs))
         bx = left
-        for idx, (pct, color) in enumerate(segs):
+        for pct, color in segs:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 22))
             p.drawRoundedRect(QRectF(bx, bar_y, seg_w, bar_h), 1.1, 1.1)
             c = T.load_color(pct, color)
-            c.setAlpha(130 if idx >= len(segs) - 2 and idx == len(segs) - 1 else 190)
+            c.setAlpha(190)
             p.setBrush(c)
             fill_w = seg_w * max(0.0, min(pct, 100.0)) / 100.0
             if fill_w > 1:
@@ -2097,14 +2094,12 @@ class IslandWindow(QWidget):
             p.setPen(T.MUTED)
             p.drawText(QRectF(tx, block_top, tw, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
             if label == "磁盘":
-                # 磁盘读写速率两位太宽，拆成上下两行更清楚
+                # 竖版一行放不下两种速率，缩到 8px 单行写 R/W
                 p.setFont(vf_small)
                 p.setPen(T.DISK)
-                p.drawText(QRectF(tx, block_top + 11, tw, 11),
+                p.drawText(QRectF(tx, block_top + 13, tw, 14),
                            Qt.AlignLeft | Qt.AlignVCenter,
-                           f"R{self._brief_rate(d.get('disk_r', 0.0))}")
-                p.drawText(QRectF(tx, block_top + 22, tw, 11),
-                           Qt.AlignLeft | Qt.AlignVCenter,
+                           f"R{self._brief_rate(d.get('disk_r', 0.0))} "
                            f"W{self._brief_rate(d.get('disk_w', 0.0))}")
                 continue
             small = label in ("NET", "磁盘")
