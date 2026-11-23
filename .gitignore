@@ -41,3 +41,5 @@ tools/pagefile_nt.py
 tools/pf_check.py
 
 tools/width_measure.py
+tools/side_w_measure.py
+tools/*_measure.py
