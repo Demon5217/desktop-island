@@ -11,7 +11,7 @@ import shutil
 
 APP_NAME = "DesktopIsland"
 APP_TITLE = "桌面灵动岛"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 _APPDATA = os.environ.get("APPDATA") or os.path.expanduser("~")
 CFG_DIR = os.path.join(_APPDATA, APP_NAME)
