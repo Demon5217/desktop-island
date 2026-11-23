@@ -35,3 +35,9 @@ Thumbs.db
 .vscode/
 .idea/
 tools/clip_probe2.py
+
+tools/pagefile_probe.py
+tools/pagefile_nt.py
+tools/pf_check.py
+
+tools/width_measure.py

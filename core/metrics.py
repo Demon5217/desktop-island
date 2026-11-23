@@ -11,6 +11,8 @@ UI 线程只负责画，永远不做 IO / 系统调用，这样动画才不会�
 from __future__ import annotations
 
 import ctypes
+import json
+import subprocess
 import threading
 import time
 from ctypes import wintypes
@@ -70,6 +72,50 @@ def read_commit() -> dict:
     return out
 
 
+_PF_PS = (
+    "Get-CimInstance Win32_PageFileUsage | "
+    "Select-Object Name,AllocatedBaseSize,CurrentUsage | "
+    "ConvertTo-Json -Compress"
+)
+
+
+def read_pagefiles() -> Optional[list]:
+    """各盘页面文件的分布（名字 / 分配大小 / 当前用量）。
+
+    WMI 走 PowerShell 子进程要 0.6~1 秒，所以不放在每秒的采样里，
+    由采集线程每 30 秒刷一次，界面只读缓存。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PF_PS],
+            capture_output=True, text=True, timeout=20,
+            creationflags=0x08000000,          # CREATE_NO_WINDOW，不闪黑窗
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        raw = json.loads(out.stdout.strip())
+        if isinstance(raw, dict):
+            raw = [raw]
+        files = []
+        for item in raw:
+            name = str(item.get("Name") or "")
+            total_mb = float(item.get("AllocatedBaseSize") or 0)
+            used_mb = float(item.get("CurrentUsage") or 0)
+            if total_mb <= 0:
+                continue
+            files.append({
+                "name": name,
+                "drive": name[:1].upper() or "?",
+                "total_gb": total_mb / 1024.0,
+                "used_gb": used_mb / 1024.0,
+                "pct": used_mb / total_mb * 100.0,
+            })
+        files.sort(key=lambda f: f["name"])
+        return files
+    except Exception:
+        return None
+
+
 class GpuReader:
     """包一层 NVML，读不到就安静地返回 None，不让整个组件挂掉。"""
 
@@ -124,6 +170,8 @@ class MetricsWorker(QThread):
         self.interval = interval
         self._stop = threading.Event()
         self._gpu = GpuReader()
+        self._pagefiles: list = []
+        self._pf_poller: Optional[threading.Thread] = None
 
     # 给 UI 用来显示显卡名 / 总显存
     @property
@@ -137,6 +185,17 @@ class MetricsWorker(QThread):
     def stop(self) -> None:
         self._stop.set()
 
+    def _poll_pagefiles(self) -> None:
+        """WMI 走子进程要 0.8 秒左右，单独线程每 30 秒刷一次，别拖慢每秒采样。"""
+        while not self._stop.is_set():
+            pf = read_pagefiles()
+            if pf is not None:
+                self._pagefiles = pf
+            for _ in range(300):          # 30 秒，分小段睡以便及时退出
+                if self._stop.is_set():
+                    return
+                time.sleep(0.1)
+
     def run(self) -> None:
         # 第一次调用返回 0，先丢掉，让后面的百分比有意义
         psutil.cpu_percent(None)
@@ -146,6 +205,8 @@ class MetricsWorker(QThread):
         cores = psutil.cpu_count(logical=False) or psutil.cpu_count() or 0
         cpu_name = _cpu_brand()
         first = True
+        self._pf_poller = threading.Thread(target=self._poll_pagefiles, daemon=True)
+        self._pf_poller.start()
 
         while not self._stop.is_set():
             t0 = time.perf_counter()
@@ -200,6 +261,8 @@ class MetricsWorker(QThread):
                     data["commit_pct"] = (used / limit * 100.0) if limit else 0.0
                     data["pagefile_total"] = commit.get("pagefile_total", 0.0)
                     data["pagefile_used"] = commit.get("pagefile_used", 0.0)
+                # 各盘页面文件分布由后台线程 30 秒刷一次，这里只读缓存
+                data["pagefiles"] = self._pagefiles
                 gpu = self._gpu.read()
                 if gpu:
                     data.update(gpu)

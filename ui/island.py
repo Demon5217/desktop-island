@@ -113,7 +113,7 @@ RATE_FOCUS = {"net_up", "net_down", "disk_r", "disk_w"}
 class IslandWindow(QWidget):
     INSET = 12
     SNAP_DIST = 48          # 胶囊本体离屏幕任一边小于这个距离，松手就吸附上去
-    COLLAPSED_W = 480
+    COLLAPSED_W = 420        # 右端速率贴紧指标后按实测最宽内容定的宽，整体更紧凑
     COLLAPSED_H_IDLE = 52
     COLLAPSED_H_PLAY = 68
     SIDE_W = 62             # 贴左右两侧时的竖向胶囊（本体尺寸，不含 INSET）
@@ -1987,20 +1987,22 @@ class IslandWindow(QWidget):
                        f"↓{self._brief_rate(d.get('net_down', 0.0))}")
             disk_txt = (f"R{self._brief_rate(d.get('disk_r', 0.0))} "
                         f"W{self._brief_rate(d.get('disk_w', 0.0))}")
+            # 贴近前四项，不右对齐，省下中间那段空白
             gap_px = 10.0
+            avail = body.right() - margin - x - 8
             net_px = fm.horizontalAdvance(net_txt)
             disk_px = fm.horizontalAdvance(disk_txt)
-            if net_px + gap_px + disk_px <= right_w:
+            if net_px + gap_px + disk_px <= avail:
                 p.setPen(T.NET)
-                p.drawText(QRectF(x + 8, cy - 12, right_w - gap_px - disk_px, 24),
-                           Qt.AlignRight | Qt.AlignVCenter, net_txt)
+                p.drawText(QRectF(x + 8, cy - 12, net_px + 2, 24),
+                           Qt.AlignLeft | Qt.AlignVCenter, net_txt)
                 p.setPen(T.DISK)
-                p.drawText(QRectF(body.right() - margin - disk_px - 2, cy - 12,
-                                  disk_px + 2, 24),
-                           Qt.AlignRight | Qt.AlignVCenter, disk_txt)
+                p.drawText(QRectF(x + 8 + net_px + gap_px, cy - 12, disk_px + 2, 24),
+                           Qt.AlignLeft | Qt.AlignVCenter, disk_txt)
             else:
                 p.setPen(T.NET)
-                p.drawText(rect, Qt.AlignRight | Qt.AlignVCenter, net_txt)
+                p.drawText(QRectF(x + 8, cy - 12, avail, 24),
+                           Qt.AlignLeft | Qt.AlignVCenter, net_txt)
 
         # 底部：有声音就变成频谱律动，没声音回到占用条（CPU/GPU/RAM/VRAM/读/写 六段）
         bar_y = body.bottom() - 3
@@ -2079,16 +2081,18 @@ class IslandWindow(QWidget):
         tw = body.width() - 19.0
         for i, (label, value, pct, color) in enumerate(items):
             block_top = body.top() + pad_top + row_h * i + (row_h - block_h) / 2.0
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 34))
-            p.drawRoundedRect(QRectF(bar_x, block_top, bar_w, bar_h), 1.5, 1.5)
-            c = T.load_color(pct, color)
-            c.setAlpha(215)
-            p.setBrush(c)
-            fill = bar_h * max(0.0, min(float(pct), 100.0)) / 100.0
-            if fill > 1.0:
-                p.drawRoundedRect(QRectF(bar_x, block_top + bar_h - fill, bar_w, fill),
-                                  1.5, 1.5)
+            if label != "磁盘":
+                # 磁盘读写和网速一样只给文字，不画竖条
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(255, 255, 255, 34))
+                p.drawRoundedRect(QRectF(bar_x, block_top, bar_w, bar_h), 1.5, 1.5)
+                c = T.load_color(pct, color)
+                c.setAlpha(215)
+                p.setBrush(c)
+                fill = bar_h * max(0.0, min(float(pct), 100.0)) / 100.0
+                if fill > 1.0:
+                    p.drawRoundedRect(QRectF(bar_x, block_top + bar_h - fill, bar_w, fill),
+                                      1.5, 1.5)
             p.setFont(lf)
             p.setPen(T.MUTED)
             p.drawText(QRectF(tx, block_top, tw, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
@@ -2276,30 +2280,34 @@ class IslandWindow(QWidget):
         if d.get("vram_total"):
             vram_pct = d.get("vram_used", 0.0) / d["vram_total"] * 100.0
         commit_pct = d.get("commit_pct", 0.0) or 0.0
+        pf = d.get("pagefiles") or []
+        pf_sub3 = "   ".join(
+            f"{f['drive']} {f['total_gb']:.0f}G · {f['pct']:.0f}%" for f in pf
+        ) if pf else None
 
         cards = [
             ("CPU", cpu, f"{cpu:.0f}%",
              f"{d.get('cpu_ghz', 0.0):.1f} GHz · {d.get('cpu_cores', 0)} 核",
-             T.CPU, self._hist["cpu"], None, "cpu"),
+             T.CPU, self._hist["cpu"], None, "cpu", None, None),
             ("GPU", gpu or 0.0, "--" if gpu is None else f"{gpu:.0f}%", gpu_sub,
-             T.GPU, self._hist["gpu"], None, "gpu"),
+             T.GPU, self._hist["gpu"], None, "gpu", None, None),
             ("内存", d.get("ram", 0.0), f"{d.get('ram', 0.0):.0f}%",
              f"{d.get('ram_used', 0.0):.1f} / {d.get('ram_total', 0.0):.1f} GB",
-             T.RAM, self._hist["ram"], None, "mem"),
+             T.RAM, self._hist["ram"], None, "mem", None, None),
             ("显存", vram_pct, f"{vram_pct:.0f}%" if d.get("vram_total") else "--",
              f"{d.get('vram_used', 0.0):.1f} / {d.get('vram_total', 0.0):.1f} GB" if d.get("vram_total") else "不可用",
-             T.VRAM, self._hist["vram"], None, "vram"),
+             T.VRAM, self._hist["vram"], None, "vram", None, None),
             ("提交内存", commit_pct, f"{commit_pct:.0f}%" if d.get("commit_limit") else "--",
              f"{d.get('commit_used', 0.0):.1f} / {d.get('commit_limit', 0.0):.1f} GB",
              T.COMMIT, self._hist["commit"],
              f"页文件 {d.get('pagefile_used', 0.0):.2f} / {d.get('pagefile_total', 0.0):.0f} GB"
              if d.get("pagefile_total") else None,
-             "mem"),
+             "mem", pf_sub3, pf or None),
         ]
 
         self._card_hits.clear()
         for i, card in enumerate(cards):
-            title, pct, value, sub, color, hist, sub2, sort_key = card
+            title, pct, value, sub, color, hist, sub2, sort_key, sub3, pfiles = card
             if i < 2:
                 r = QRectF(inner.left() + i * (top_w + gap), inner.top(), top_w, top_h)
             else:
@@ -2311,7 +2319,8 @@ class IslandWindow(QWidget):
             p.save()
             p.setOpacity(p.opacity() * op)
             p.translate(0, (1.0 - op) * 5.0)
-            self._paint_card(p, r, title, pct, value, sub, color, hist, sub2)
+            self._paint_card(p, r, title, pct, value, sub, color, hist, sub2,
+                             sub3, pfiles)
             p.restore()
             self._card_hits[sort_key] = r
 
@@ -2331,7 +2340,7 @@ class IslandWindow(QWidget):
             p.restore()
 
     def _paint_card(self, p, rect, title, pct, value_text, sub_text, color, hist,
-                    sub_text2=None) -> None:
+                    sub_text2=None, sub_text3=None, pagefiles=None) -> None:
         p.setPen(Qt.NoPen)
         p.setBrush(T.CARD_BG)
         path = QPainterPath()
@@ -2373,9 +2382,25 @@ class IslandWindow(QWidget):
                        Qt.AlignLeft | Qt.AlignVCenter, sub2)
             spark_top = 62
 
-        spark = QRectF(rect.left() + x_inset, rect.top() + spark_top,
-                       rect.width() - x_inset * 2, rect.height() - spark_top - 14)
-        self._paint_spark(p, spark, hist, color)
+        if sub_text3:
+            p.setFont(T.font(8, spacing=0.1))
+            fm3 = QFontMetrics(p.font())
+            sub3 = fm3.elidedText(sub_text3, Qt.ElideRight, int(rect.width() - x_inset * 2))
+            p.setPen(T.DIM)
+            p.drawText(QRectF(rect.left() + x_inset, rect.top() + 62,
+                              rect.width() - x_inset * 2, 11),
+                       Qt.AlignLeft | Qt.AlignVCenter, sub3)
+            spark_top = 74
+
+        if pagefiles:
+            # 页面文件的盘符分布：每段宽度按各盘容量占比，段内填充按该盘使用率
+            pf_bar = QRectF(rect.left() + x_inset, rect.top() + 78,
+                            rect.width() - x_inset * 2, 5.0)
+            self._paint_pf_bar(p, pf_bar, pagefiles)
+        else:
+            spark = QRectF(rect.left() + x_inset, rect.top() + spark_top,
+                           rect.width() - x_inset * 2, rect.height() - spark_top - 14)
+            self._paint_spark(p, spark, hist, color)
 
         # 卡底一条 2px 分类色细条，比胶囊底边四段条更克制
         strip = QRectF(rect.left() + x_inset, rect.bottom() - 7.5,
@@ -2385,6 +2410,26 @@ class IslandWindow(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(c)
         p.drawRoundedRect(strip, 1.0, 1.0)
+
+    def _paint_pf_bar(self, p, rect: QRectF, files: list) -> None:
+        """页面文件各盘分布条：段宽按容量占比，段内填充按该盘使用率。"""
+        total = sum(float(f.get("total_gb") or 0.0) for f in files) or 1.0
+        n = len(files)
+        gap = 4.0
+        avail = max(1.0, rect.width() - gap * (n - 1))
+        x = rect.left()
+        p.setPen(Qt.NoPen)
+        for f in files:
+            seg_w = avail * float(f.get("total_gb") or 0.0) / total
+            p.setBrush(QColor(255, 255, 255, 20))
+            p.drawRoundedRect(QRectF(x, rect.top(), seg_w, rect.height()), 2.0, 2.0)
+            c = QColor(T.COMMIT)
+            c.setAlpha(205)
+            p.setBrush(c)
+            fill = seg_w * max(0.0, min(float(f.get("pct") or 0.0), 100.0)) / 100.0
+            if fill > 1.0:
+                p.drawRoundedRect(QRectF(x, rect.top(), fill, rect.height()), 2.0, 2.0)
+            x += seg_w + gap
 
     def _paint_spark(self, p, rect, hist, color) -> None:
         # 底线交给卡片底部那条分类色，这里只留一条 75% 参考线
